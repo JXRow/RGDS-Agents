@@ -72,7 +72,7 @@ function M.open(width, height)
     end
 
     local pos = bit.bor(SDL_WINDOWPOS_UNDEFINED_DISPLAY, M.display)
-    hud = SDL.SDL_CreateWindow("Pocket Garden (v2) info", pos, pos, width, height,
+    hud = SDL.SDL_CreateWindow("RGDS-Agents info", pos, pos, width, height,
         bit.bor(SDL_WINDOW_OPENGL, SDL_WINDOW_FULLSCREEN, SDL_WINDOW_BORDERLESS))
     if hud == nil then return false, sdlError("CreateWindow") end
 

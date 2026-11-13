@@ -1,7 +1,7 @@
 function love.conf(t)
-    t.identity = "rgds-lua-demo-v2"  -- 存档目录与原版 rgds-lua-demo 分开
+    t.identity = "RGDS-Agents"  -- 存档目录与原版 rgds-lua-demo 分开
     t.version = "11.3"              -- 掌机自带 LÖVE 11.5，写 11.3 兼容更旧的构建
-    t.window.title = "Pocket Garden (v2)"
+    t.window.title = "RGDS-Agents"
     t.window.width = 640            -- RGDS 原生分辨率（DSI-1 / DSI-2 均为 640x480）
     t.window.height = 480
     t.window.fullscreen = false     -- Mac 窗口运行；掌机端由启动脚本决定是否全屏

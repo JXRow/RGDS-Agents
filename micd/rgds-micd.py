@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""rgds-micd: RG DS 麦克风采集守护进程（rgds-lua-demo-v2 的启动脚本随游戏启停）。
+"""rgds-micd: RG DS 麦克风采集守护进程（RGDS-Agents 的启动脚本随游戏启停）。
 
 经 ALSA dsnoop 读机身麦克风（RK817 "Main Mic"，只在左声道），dsnoop 可多进程共享，
 所以别的进程（如离线语音识别）照样能自己再开一个 dsnoop 读者。读到的音频分两路发出：

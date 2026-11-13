@@ -8,7 +8,7 @@ import ctypes
 import os
 import sys
 
-LIB = os.environ.get("LUAJIT_LIB", "/mnt/mmc/Roms/APPS/rgds-lua-demo-v2/lib/libluajit-5.1.so.2")
+LIB = os.environ.get("LUAJIT_LIB", "/mnt/mmc/Roms/APPS/RGDS-Agents/lib/libluajit-5.1.so.2")
 lj = ctypes.CDLL(LIB, mode=ctypes.RTLD_GLOBAL)
 lj.luaL_newstate.restype = ctypes.c_void_p
 lj.luaL_openlibs.argtypes = [ctypes.c_void_p]

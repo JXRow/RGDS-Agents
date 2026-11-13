@@ -1,4 +1,4 @@
--- Pocket Garden — RGDS (Anbernic RG DS) LÖVE 演示
+-- RGDS-Agents (Anbernic RG DS) LÖVE 演示
 -- 移植自 rg34xx-lua-app：分辨率 720x480 -> 640x480，按键表换成 RK3568 拓扑，
 -- 新增触摸显示、网络探测，以及 --selftest / --inputlog 两个验证模式。
 -- fixed 版：网络探测改为 love.thread 后台执行不卡帧；自检如实报告音频是否真的拿到播放设备。

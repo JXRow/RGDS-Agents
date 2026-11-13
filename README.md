@@ -1,4 +1,4 @@
-# Pocket Garden
+# RGDS-Agents
 
 LÖVE game for the Anbernic RG DS. Speech is a small `sv-helper` process (sherpa-onnx SenseVoice) beside the game. Chat goes through `rgds-aid.py`, which calls an OpenAI-compatible chat endpoint. The API key stays on the device.
 
@@ -20,12 +20,12 @@ The device needs LÖVE 11.5 at `/opt/love/love-11.5`. `deploy.sh` copies that in
 ./deploy.sh rgds
 ```
 
-`rgds` is the SSH host (`rgds.local`). That copies the app to `/mnt/mmc/Roms/APPS/rgds-lua-demo-v2/` and writes the menu entry `/mnt/mmc/Roms/APPS/rgds-lua-demo-v2.sh`.
+`rgds` is the SSH host (`rgds.local`). That copies the app to `/mnt/mmc/Roms/APPS/RGDS-Agents/` and writes the menu entry `/mnt/mmc/Roms/APPS/RGDS-Agents.sh`.
 
 Launch it from the device APPS menu. With the menu already up:
 
 ```sh
-ssh rgds /mnt/mmc/Roms/APPS/rgds-lua-demo-v2/run-via-menu.sh
+ssh rgds /mnt/mmc/Roms/APPS/RGDS-Agents/run-via-menu.sh
 ```
 
 Do not SSH the menu script itself. The menu still holds the audio device and the gamepad.
