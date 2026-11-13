@@ -1,0 +1,28 @@
+# Secrets. Never commit API keys or key files.
+minimax.key
+*.key
+*.pem
+.env
+.env.*
+
+# Local configs that carry an API key (rgds-aid reads config.json).
+config.json
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Dated backup copies of the app
+rgds-lua-app-v2-backup-*/
+
+# Downloaded speech models and bulky native runtime libraries
+*.onnx
+*.so
+*.bin
+*.gguf
+*.safetensors
+*.pt
+*.pth
+
+# Device build of stt/sv-helper.c
+rgds-lua-app-v2/stt/sv-helper
