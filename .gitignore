@@ -21,9 +21,9 @@ __pycache__/
 *.pth
 
 # Device build of stt/sv-helper.c
-rgds-lua-app-v2/stt/sv-helper
-rgds-lua-app-v2/stt/sv-helper.new
+stt/sv-helper
+stt/sv-helper.new
 
 # Archives and extracted SDK from setup-stt.sh
-rgds-lua-app-v2/.cache/
+.cache/
 *.tar.bz2

@@ -1,5 +1,5 @@
 #!/bin/sh
-# 部署 rgds-lua-app-v2 到 Anbernic RG DS（TF 卡 /mnt/mmc），与原版 rgds-lua-demo 并存互不覆盖
+# 部署本仓库到 Anbernic RG DS（TF 卡 /mnt/mmc），与原版 rgds-lua-demo 并存互不覆盖
 # 用法: ./deploy.sh [目标]        默认 rgds（mDNS: rgds.local）
 #
 # 目录布局（全部在 TF 卡上，自包含）：

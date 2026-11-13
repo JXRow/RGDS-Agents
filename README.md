@@ -1,10 +1,10 @@
 # Pocket Garden
 
-LÖVE game for the Anbernic RG DS. The app is `rgds-lua-app-v2`. Speech is a small `sv-helper` process (sherpa-onnx SenseVoice) beside the game. Chat goes through `rgds-aid.py`, which calls an OpenAI-compatible chat endpoint. The API key stays on the device.
+LÖVE game for the Anbernic RG DS. Speech is a small `sv-helper` process (sherpa-onnx SenseVoice) beside the game. Chat goes through `rgds-aid.py`, which calls an OpenAI-compatible chat endpoint. The API key stays on the device.
 
 ## Setup
 
-The model, sherpa libraries, and `stt/sv-helper` are not in git. From `rgds-lua-app-v2`:
+The model, sherpa libraries, and `stt/sv-helper` are not in git. From the repo root:
 
 ```sh
 ./setup-stt.sh

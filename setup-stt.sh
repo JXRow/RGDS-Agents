@@ -1,6 +1,6 @@
 #!/bin/sh
 # Download the SenseVoice model and the sherpa-onnx libs sv-helper links, then
-# build stt/sv-helper for aarch64. Run this on the dev machine from rgds-lua-app-v2.
+# build stt/sv-helper for aarch64. Run this on the dev machine from the repo root.
 # On the device (aarch64) the same script uses the native gcc.
 #
 # The helper already in this tree was linked against the v2.0.1 shared build,
