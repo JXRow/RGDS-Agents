@@ -1,5 +1,4 @@
 # Secrets. Never commit API keys or key files.
-minimax.key
 *.key
 *.pem
 .env
@@ -11,9 +10,6 @@ config.json
 # Python bytecode
 __pycache__/
 *.py[cod]
-
-# Dated backup copies of the app
-rgds-lua-app-v2-backup-*/
 
 # Downloaded speech models and bulky native runtime libraries
 *.onnx
