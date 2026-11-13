@@ -56,4 +56,4 @@ Optional fields: `system`, `max_tokens`, `history_turns` (default 6). Chat fails
 
 ## Left out of git
 
-`minimax.key` and any `config.json` with an API key, `stt/model.int8.onnx`, `stt/lib/*.so`, `stt/sv-helper`, downloaded archives under `.cache/`, and the dated `rgds-lua-app-v2-backup-*` trees.
+`minimax.key` and any `config.json` with an API key, `stt/model.int8.onnx`, `stt/lib/*.so`, `stt/sv-helper`, and downloaded archives under `.cache/`.
