@@ -2,7 +2,7 @@
 
 LÖVE game for the Anbernic RG DS. The app is `rgds-lua-app-v2`. Speech is a small `sv-helper` process (sherpa-onnx SenseVoice) beside the game. Chat goes through `rgds-aid.py`, which calls an OpenAI-compatible chat endpoint. The API key stays on the device.
 
-## Fresh checkout
+## Setup
 
 The model, sherpa libraries, and `stt/sv-helper` are not in git. From `rgds-lua-app-v2`:
 
@@ -53,7 +53,3 @@ DeepSeek, or any other OpenAI-compatible API, is the same file with your own `ba
 ```
 
 Optional fields: `system`, `max_tokens`, `history_turns` (default 6). Chat fails closed unless `api_key`, `base_url`, and `model` are all set.
-
-## Left out of git
-
-`minimax.key` and any `config.json` with an API key, `stt/model.int8.onnx`, `stt/lib/*.so`, `stt/sv-helper`, and downloaded archives under `.cache/`.
