@@ -26,3 +26,8 @@ rgds-lua-app-v2-backup-*/
 
 # Device build of stt/sv-helper.c
 rgds-lua-app-v2/stt/sv-helper
+rgds-lua-app-v2/stt/sv-helper.new
+
+# Archives and extracted SDK from setup-stt.sh
+rgds-lua-app-v2/.cache/
+*.tar.bz2
