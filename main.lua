@@ -731,6 +731,8 @@ function love.joystickpressed(joy, button)
         shutdownDialog = true
     elseif button == PTT_BUTTON then
         pttPress()
+    elseif button == 12 then                    -- R2:退出应用(与右上角 ✕ 等效)
+        love.event.push("quit")
     end
 end
 
@@ -750,10 +752,12 @@ end
 
 function love.touchpressed(id, x, y)
     recordInput("touch", id, string.format("%.0f,%0.f", x, y))
+    if inRect(exitBtn, x, y) then love.event.push("quit") end
 end
 
 function love.mousepressed(x, y, button)
     recordInput("mouse", button, string.format("%.0f,%0.f", x, y))
+    if button == 1 and inRect(exitBtn, x, y) then love.event.push("quit") end
 end
 
 -- === 绘制 ===
@@ -870,29 +874,59 @@ local function drawSky()
     love.graphics.circle("fill", 80, 470, 150)
 end
 
+local exitBtn = {x = 588, y = 6, w = 40, h = 40}
+
+local function inRect(b, x, y)
+    return x >= b.x and x < b.x + b.w and y >= b.y and y < b.y + b.h
+end
+
+-- 关闭按钮符号用两条斜线画,避免字体缺字形显示成方块
+local function drawXMark(b)
+    local cx, cy, r = b.x + b.w / 2, b.y + b.h / 2, 9
+    love.graphics.setLineWidth(3)
+    love.graphics.line(cx - r, cy - r, cx + r, cy + r)
+    love.graphics.line(cx - r, cy + r, cx + r, cy - r)
+    love.graphics.setLineWidth(1)
+end
+
+local exitBtn = {x = 588, y = 6, w = 40, h = 40}
+
+local function inRect(b, x, y)
+    return x >= b.x and x < b.x + b.w and y >= b.y and y < b.y + b.h
+end
+
+-- 关闭按钮符号用两条斜线画,避免字体缺字形显示成方块
+local function drawXMark(b)
+    local cx, cy, r = b.x + b.w / 2, b.y + b.h / 2, 9
+    love.graphics.setLineWidth(3)
+    love.graphics.line(cx - r, cy - r, cx + r, cy + r)
+    love.graphics.line(cx - r, cy + r, cx + r, cy - r)
+    love.graphics.setLineWidth(1)
+end
+
 local function drawHeader()
     color("cream")
     love.graphics.setFont(fonts[22])
-    love.graphics.print("POCKET GARDEN", 14, 14)
-    color("mint", 0.75)
-    love.graphics.setFont(fonts[10])
-    love.graphics.print("RGDS · LÖVE demo · v2", 16, 42)
+    love.graphics.print("RGDS-AGENTS", 14, 14)
+    if fonts.cjk then
+        color("mint", 0.75)
+        love.graphics.setFont(fonts.cjk)
+        love.graphics.print("AI 对话 · v2", 16, 40)
+    else
+        color("mint", 0.75)
+        love.graphics.setFont(fonts[10])
+        love.graphics.print("AI CHAT · v2", 16, 42)
+    end
     color("gold", 0.85)
     love.graphics.setFont(fonts[9])
     love.graphics.print(string.format("FPS %02d · MEM %.1f MB · SND %s · MIC %s", love.timer.getFPS(),
         collectgarbage("count") / 1024, audio.enabled and "on" or "off",
         micwave.recording and "REC" or (micwave.isLive() and "live" or "off")), 210, 42)
 
-    drawRoundedBox(452, 12, 176, 46, 12, "ink", 0.72)
-    color("gold")
-    love.graphics.setFont(fonts[9])
-    love.graphics.print("SEEDS COLLECTED", 466, 20)
+    -- 右上角关闭按钮:点击(触摸/鼠标)或按 R2 退出应用,回 MUOS 菜单
+    drawRoundedBox(exitBtn.x, exitBtn.y, exitBtn.w, exitBtn.h, 10, "ink", 0.72)
     color("cream")
-    love.graphics.setFont(fonts[20])
-    love.graphics.print(string.format("%02d", score), 466, 31)
-    color("mint", 0.8)
-    love.graphics.setFont(fonts[9])
-    love.graphics.print("BEST " .. string.format("%02d", best), 528, 36)
+    drawXMark(exitBtn)
 end
 
 local function drawHint(info)
@@ -900,9 +934,9 @@ local function drawHint(info)
     love.graphics.setFont(fonts[9])
     local hint
     if info and aid.hasLog() then
-        hint = "D-PAD UP  OLDER   ·   D-PAD DOWN  NEWER   ·   HOLD R1 TALK   ·   SELECT QUIT"
+        hint = "D-PAD UP  OLDER   ·   D-PAD DOWN  NEWER   ·   HOLD R1 TALK   ·   R2 / X-EXIT"
     elseif hud.external then
-        hint = "HAT MOVE  ·  A START  ·  B NET  ·  HOLD R1 TALK  ·  SELECT QUIT  ·  R RESTART"
+        hint = "HAT MOVE  ·  A START  ·  B NET  ·  HOLD R1 TALK  ·  R2 / X-EXIT  ·  R RESTART"
     else
         hint = "HAT MOVE  ·  A START  ·  B NET  ·  SELECT QUIT  ·  R RESTART"
     end
@@ -1159,6 +1193,11 @@ local function drawChatLog()
         end
     end
     love.graphics.pop()
+    if #chatLines == 0 then
+        color("cream", 0.55)
+        love.graphics.setFont(font)
+        love.graphics.printf("按住 R1 说话，开始对话", x, y + h / 2 - 10, w, "center")
+    end
     if chatMax > 0 then
         local trackX = x + w - 8
         local barH = math.max(16, (chatView / #chatLines) * innerH)
@@ -1192,75 +1231,23 @@ local function drawMicStrip()
 end
 
 local function drawInfoScreen()
+    -- 阶段二:砍掉开机测试界面(RUNTIME/LAST INPUT/状态面板),直接进 AI 对话框
     drawSky()
     drawHeader()
-    if aid.hasLog() then
-        drawChatLog()
-        drawMicStrip()
-    else
-        drawRuntimePanel()
-        drawInputPanel()
-        drawStatusPanel()
-        drawMicPanel()
-    end
+    drawChatLog()
+    drawMicStrip()
     drawHint(true)
 end
 
 function love.draw()
-    drawSky()
-
-    for _, petal in ipairs(petals) do
-        color("cream", 0.12 + petal.size / 18)
-        love.graphics.circle("fill", petal.x, petal.y, petal.size)
-    end
-
-    if not hud.external then drawHeader() end
-
-    drawGame()
-
-    if not started then
-        local top = FIELD_TOP + (H - FIELD_TOP) / 2 - 85
-        color("ink", 0.82)
-        love.graphics.rectangle("fill", 0, FIELD_TOP, W, H - FIELD_TOP)
-        color("cream")
-        love.graphics.setFont(fonts[28])
-        love.graphics.printf("GROW SOMETHING", 0, top, W, "center")
-        color("mint")
-        love.graphics.setFont(fonts[12])
-        love.graphics.printf("Collect the glowing seeds", 0, top + 40, W, "center")
-        drawRoundedBox(200, top + 80, 240, 44, 14, "gold")
-        color("ink")
-        love.graphics.setFont(fonts[14])
-        love.graphics.printf("PRESS  A  /  START", 200, top + 94, 240, "center")
-    end
-
-    if not hud.external then
-        drawRuntimePanel()
-        drawInputPanel()
-    end
-
-    drawSttBanner()
-
-    if shutdownDialog then
-        color("ink", 0.7)
-        love.graphics.rectangle("fill", 0, 0, W, H)
-        drawRoundedBox(190, 176, 260, 110, 16, "ink", 1)
-        color("gold")
-        love.graphics.setFont(fonts[22])
-        love.graphics.printf("SHUTDOWN?", 0, 196, W, "center")
-        color("cream")
-        love.graphics.setFont(fonts[11])
-        love.graphics.printf("A confirm  /  B cancel", 0, 234, W, "center")
-    end
+    -- 阶段一:砍掉上屏游戏,主窗口(上屏)只留黑屏。
+    -- 信息面板照常走下屏副屏窗口;语音管线(mic/stt/aid)的更新在 love.update 里,不受影响。
+    love.graphics.clear(0, 0, 0, 1)
 
     if hud.external then
         subscreen.present(drawInfoScreen)
     else
-        drawHint()
-    end
-
-    if selftest then
-        drawSelftest()
+        drawInfoScreen()
     end
 end
 
