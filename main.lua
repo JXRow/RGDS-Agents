@@ -11,6 +11,7 @@
 --     回复留在信息面板，长回复在这块屏上换行，十字键上下滚动；流式输出时跟着最新一行。
 --     主屏只留开头一两行，大约 5 秒。语音识别保持离线。
 --     助手、密钥或网络挂了，游戏照常跑，信息面板写明原因。
+--     点主屏（Weston 绑在 DSI-1 上的那块触摸屏）走到落点，速度和边界与十字键相同；手柄保留。
 
 local W, H = 640, 480
 local windowW, windowH = W, H
@@ -38,6 +39,8 @@ local aid = require("aid")
 local aidSeen = 0
 local PTT_BUTTON = 6                     -- R1：A/B/START/SELECT 已占用，食指按住不影响移动和 A
 local ptt = {held = false, bgmPaused = false}
+local touchGoal = nil
+local lastTapAt, lastTapX, lastTapY = -10, 0, 0
 local INPUT_LOG = "/tmp/rgds-input-v2.log"
 local shotRequested = false
 local shotTaken = false
@@ -91,6 +94,7 @@ local function reset()
     score = 0
     started = false
     pulse = 0
+    touchGoal = nil
     spawnSeed()
     if audio.bgm then audio.bgm:stop() end
 end
@@ -546,6 +550,42 @@ local function layoutChat()
     end
 end
 
+local function toGame(x, y)
+    local ww = math.max(1, love.graphics.getWidth())
+    local wh = math.max(1, love.graphics.getHeight())
+    return x * W / ww, y * H / wh
+end
+
+local function clampPlay(x, y)
+    return math.max(32, math.min(W - 32, x)),
+        math.max(PLAYER_MIN_Y, math.min(PLAYER_MAX_Y, y))
+end
+
+-- 同一次点按在 Wayland 上经常先到 touch 再到 mouse，80ms 内的同一落点只处理一次。
+local function duplicateTap(x, y)
+    local now = love.timer.getTime()
+    if now - lastTapAt < 0.08 and math.abs(x - lastTapX) < 12 and math.abs(y - lastTapY) < 12 then
+        return true
+    end
+    lastTapAt, lastTapX, lastTapY = now, x, y
+    return false
+end
+
+local function beginFromTap(x, y)
+    if shutdownDialog or selftest then return end
+    if duplicateTap(x, y) then return end
+    if not started then
+        started = true
+        playSfx("start")
+        startBgm()
+    end
+    if x < 0 or x > W or y < FIELD_TOP or y > H then return end
+    local gx, gy = clampPlay(x, y)
+    touchGoal = {x = gx, y = gy}
+    print(string.format("touch: walk %.0f,%.0f", gx, gy))
+    io.stdout:flush()
+end
+
 local function nudgeChat(dir)
     if dir < 0 then
         if chatScroll <= 0 then return end
@@ -665,6 +705,22 @@ function love.update(dt)
     if not lockV and isDown({"up", "w"}) then dy = dy - 1 end
     if not lockV and isDown({"down", "s"}) then dy = dy + 1 end
 
+    if shutdownDialog then
+        touchGoal = nil
+    elseif dx ~= 0 or dy ~= 0 then
+        touchGoal = nil
+    elseif touchGoal and started then
+        local vx, vy = touchGoal.x - player.x, touchGoal.y - player.y
+        local dist = math.sqrt(vx * vx + vy * vy)
+        local step = player.speed * dt
+        if dist <= math.max(6, step) then
+            player.x, player.y = touchGoal.x, touchGoal.y
+            touchGoal = nil
+        else
+            dx, dy = vx / dist, vy / dist
+        end
+    end
+
     local length = math.sqrt(dx * dx + dy * dy)
     if length > 1 then dx, dy = dx / length, dy / length end
     player.x = math.max(32, math.min(W - 32, player.x + dx * player.speed * dt))
@@ -749,11 +805,25 @@ function love.joystickaxis(joy, axis, value)
 end
 
 function love.touchpressed(id, x, y)
-    recordInput("touch", id, string.format("%.0f,%0.f", x, y))
+    local gx, gy = toGame(x, y)
+    recordInput("touch", id, string.format("%.0f,%.0f", gx, gy))
+    beginFromTap(gx, gy)
+end
+
+function love.touchmoved(id, x, y)
+    if not touchGoal or shutdownDialog or selftest then return end
+    local gx, gy = toGame(x, y)
+    if gx < 0 or gx > W or gy < FIELD_TOP or gy > H then return end
+    local cx, cy = clampPlay(gx, gy)
+    touchGoal.x, touchGoal.y = cx, cy
 end
 
 function love.mousepressed(x, y, button)
-    recordInput("mouse", button, string.format("%.0f,%0.f", x, y))
+    local gx, gy = toGame(x, y)
+    recordInput("mouse", button, string.format("%.0f,%.0f", gx, gy))
+    if button ~= 1 then return end
+    if love.touch and #love.touch.getTouches() > 0 then return end
+    beginFromTap(gx, gy)
 end
 
 -- === 绘制 ===
@@ -837,6 +907,12 @@ local function drawGame()
     color("gold")
     love.graphics.circle("fill", seed.x, seed.y + 7 + seedBob, 3.5)
 
+    if touchGoal then
+        color("mint", 0.85)
+        love.graphics.circle("line", touchGoal.x, touchGoal.y, 10)
+        love.graphics.circle("fill", touchGoal.x, touchGoal.y, 2.5)
+    end
+
     for _, point in ipairs(player.trail) do
         if point.life > 0 then
             color("mint", point.life * 0.3)
@@ -900,9 +976,9 @@ local function drawHint(info)
     love.graphics.setFont(fonts[9])
     local hint
     if info and aid.hasLog() then
-        hint = "D-PAD UP  OLDER   ·   D-PAD DOWN  NEWER   ·   HOLD R1 TALK   ·   SELECT QUIT"
+        hint = "D-PAD UP  OLDER   ·   D-PAD DOWN  NEWER   ·   TAP WALK   ·   HOLD R1 TALK   ·   SELECT QUIT"
     elseif hud.external then
-        hint = "HAT MOVE  ·  A START  ·  B NET  ·  HOLD R1 TALK  ·  SELECT QUIT  ·  R RESTART"
+        hint = "HAT OR TAP WALK  ·  A START  ·  B NET  ·  HOLD R1 TALK  ·  SELECT QUIT  ·  R RESTART"
     else
         hint = "HAT MOVE  ·  A START  ·  B NET  ·  SELECT QUIT  ·  R RESTART"
     end
@@ -1231,7 +1307,7 @@ function love.draw()
         drawRoundedBox(200, top + 80, 240, 44, 14, "gold")
         color("ink")
         love.graphics.setFont(fonts[14])
-        love.graphics.printf("PRESS  A  /  START", 200, top + 94, 240, "center")
+        love.graphics.printf("TAP  OR  PRESS  A", 200, top + 94, 240, "center")
     end
 
     if not hud.external then
