@@ -42,6 +42,7 @@ local btnDown, wasDown = false, false
 local curSlot = 0
 local slotX, slotY, slotActive = {}, {}, {}
 local lastX, lastY = -1, -1
+local rawDumps = 0
 local limX, limY = {min = 0, max = 0}, {min = 0, max = 0}
 local onPointer
 local rawBuf = ffi.new("rgds_input_event[64]")
@@ -88,15 +89,24 @@ function M.pump()
     if fd < 0 or not onPointer then return end
     local n = ffi.C.read(fd, rawBuf, 64 * ffi.sizeof("rgds_input_event"))
     if n <= 0 then return end
-    local count = math.floor(n / ffi.sizeof("rgds_input_event"))
+    local count = math.floor(tonumber(n) / ffi.sizeof("rgds_input_event"))
     local posX, posY = nil, nil
+    local sawPos = false
+    local function slotDown()
+        for s = 0, 9 do
+            if slotActive[s] then return true end
+        end
+        return false
+    end
     local function report()
         local ax, ay
         for s = 0, 9 do
             if slotActive[s] and slotX[s] then ax, ay = slotX[s], slotY[s] break end
         end
         if not ax then ax, ay = posX, posY end
-        if btnDown and ax then
+        -- 这块 Goodix 不一定带 BTN_TOUCH。有坐标、按下键或活动 slot 都算手指还在屏上。
+        local down = (btnDown or slotDown() or sawPos) and ax ~= nil
+        if down then
             if not wasDown then
                 wasDown = true
                 lastX, lastY = ax, ay
@@ -109,7 +119,7 @@ function M.pump()
                 local sx, sy = toScreen(ax, ay)
                 onPointer("move", sx, sy)
             end
-        elseif not btnDown and wasDown then
+        elseif wasDown then
             wasDown = false
             local sx, sy = toScreen(lastX, lastY)
             onPointer(false, sx, sy)
@@ -117,7 +127,12 @@ function M.pump()
     end
     for i = 0, count - 1 do
         local e = rawBuf[i]
-        local t, c, v = e.type, e.code, e.value
+        local t, c, v = tonumber(e.type), tonumber(e.code), tonumber(e.value)
+        if rawDumps < 12 then
+            rawDumps = rawDumps + 1
+            print(string.format("evdev: raw type=%d code=%d value=%d", t, c, v))
+            io.stdout:flush()
+        end
         if t == EV_KEY and c == BTN_TOUCH then
             btnDown = v ~= 0
         elseif t == EV_ABS then
@@ -125,15 +140,17 @@ function M.pump()
                 curSlot = v
             elseif c == ABS_MT_TRACKING_ID then
                 slotActive[curSlot] = v >= 0
+                if v < 0 then btnDown = false end
             elseif c == ABS_MT_POSITION_X or c == ABS_X then
                 slotX[c == ABS_X and 0 or curSlot] = v
-                posX = v
+                posX, sawPos = v, true
             elseif c == ABS_MT_POSITION_Y or c == ABS_Y then
                 slotY[c == ABS_Y and 0 or curSlot] = v
-                posY = v
+                posY, sawPos = v, true
             end
         elseif t == EV_SYN and c == SYN_REPORT then
             report()
+            sawPos = false
         end
     end
 end
