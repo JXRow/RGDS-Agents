@@ -30,9 +30,9 @@ The info panel is a second SDL window on display 1 (`DSI-2`). It is not touched.
 
 | Phase passed to the callback | When |
 | --- | --- |
-| `true`, x, y | `BTN_TOUCH` went down. One finger. |
+| `true`, x, y | Finger down: `BTN_TOUCH`, an active tracking id, or an `ABS` position in the report. |
 | `"move"`, x, y | Finger still down and the point changed. |
-| `false`, x, y | `BTN_TOUCH` went up. The walk target stays. |
+| `false`, x, y | Finger up. The walk target stays. |
 
 x and y are main-window pixels, origin top-left, same space as drawing. Raw `ABS_X` / `ABS_Y` map with `(raw - min) / (max - min + 1) * 640` and the same for Y. This panel is landscape (`max X > max Y`), so the axes are not swapped.
 
