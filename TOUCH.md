@@ -14,7 +14,7 @@ udev marks it `ID_INPUT_TOUCHSCREEN=1`. The input properties bit is `INPUT_PROP_
 | `ABS_Y`, `ABS_MT_POSITION_Y` | 0..480 |
 | `ABS_MT_TRACKING_ID` | 0..255 |
 
-Weston does not deliver these events to the LÖVE window. `evdev.lua` opens `event1` non-blocking and reads `struct input_event` (24 bytes on this aarch64: 16-byte timeval, then type, code, value) every frame.
+Weston does not deliver these events to the LÖVE window. `evdev.lua` opens `event1` non-blocking, grabs it with `EVIOCGRAB` so the packets are not left in Weston's fd, and reads `struct input_event` (24 bytes on this aarch64: 16-byte timeval, then type, code, value) every frame. The grab is released when the game exits.
 
 `gt9xx-1` on `i2c@fe5c0000` is disabled in the device tree and has no input node. Do not enable it.
 
