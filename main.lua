@@ -41,6 +41,9 @@ local PTT_BUTTON = 6                     -- R1：A/B/START/SELECT 已占用，�
 local ptt = {held = false, bgmPaused = false}
 local touchGoal = nil
 local lastTapAt, lastTapX, lastTapY = -10, 0, 0
+local evdev = require("evdev")
+local beginFromTap
+local clampPlay
 local INPUT_LOG = "/tmp/rgds-input-v2.log"
 local shotRequested = false
 local shotTaken = false
@@ -467,6 +470,22 @@ function love.load()
     for _ = 1, 24 do addPetal() end
     reset()
 
+    -- Weston 不把 gt9xx 派发给这个 SDL 窗口。下屏的点按从 event1 直接读。
+    local evOk, evErr = evdev.open(nil, W, H, function(phase, x, y)
+        if phase == true then
+            recordInput("touch", "evdev", string.format("%.0f,%.0f", x, y))
+            beginFromTap(x, y)
+        elseif phase == "move" and touchGoal and not shutdownDialog and not selftest
+            and x >= 0 and x <= W and y >= FIELD_TOP and y <= H then
+            local cx, cy = clampPlay(x, y)
+            touchGoal.x, touchGoal.y = cx, cy
+        end
+    end)
+    if not evOk then
+        print("evdev: off (" .. tostring(evErr) .. ")")
+        io.stdout:flush()
+    end
+
     if selftest then
         love.filesystem.write("selftest.txt", "")
         probeNet()
@@ -481,6 +500,7 @@ function love.resize(width, height)
 end
 
 function love.quit()
+    evdev.close()
     micwave.stop()
     stt.stop()
     aid.stop()
@@ -556,7 +576,7 @@ local function toGame(x, y)
     return x * W / ww, y * H / wh
 end
 
-local function clampPlay(x, y)
+function clampPlay(x, y)
     return math.max(32, math.min(W - 32, x)),
         math.max(PLAYER_MIN_Y, math.min(PLAYER_MAX_Y, y))
 end
@@ -571,7 +591,7 @@ local function duplicateTap(x, y)
     return false
 end
 
-local function beginFromTap(x, y)
+function beginFromTap(x, y)
     if shutdownDialog or selftest then return end
     if duplicateTap(x, y) then return end
     if not started then
@@ -634,6 +654,7 @@ local function pollChatScroll()
 end
 
 function love.update(dt)
+    evdev.pump()
     pollNet(dt)
     micwave.update(dt)
     stt.update()
