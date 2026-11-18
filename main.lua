@@ -11,7 +11,7 @@
 --     回复留在信息面板，长回复在这块屏上换行，十字键上下滚动；流式输出时跟着最新一行。
 --     主屏只留开头一两行，大约 5 秒。语音识别保持离线。
 --     助手、密钥或网络挂了，游戏照常跑，信息面板写明原因。
---     点主屏（Weston 绑在 DSI-1 上的那块触摸屏）走到落点，速度和边界与十字键相同；手柄保留。
+--     gt9xx-0 的触摸在信息屏上。手指按下时在这块屏上画十字，并在日志里写一行。手柄保留。
 
 local W, H = 640, 480
 local windowW, windowH = W, H
@@ -40,6 +40,7 @@ local aidSeen = 0
 local PTT_BUTTON = 6                     -- R1：A/B/START/SELECT 已占用，食指按住不影响移动和 A
 local ptt = {held = false, bgmPaused = false}
 local touchGoal = nil
+local finger = nil
 local lastTapAt, lastTapX, lastTapY = -10, 0, 0
 local evdev = require("evdev")
 local beginFromTap
@@ -470,16 +471,9 @@ function love.load()
     for _ = 1, 24 do addPetal() end
     reset()
 
-    -- Weston 不把 gt9xx 派发给这个 SDL 窗口。下屏的点按从 event1 直接读。
+    -- Weston 不把 gt9xx-0 派发给 SDL。信息屏的点按从 event1 直接读。
     local evOk, evErr = evdev.open(nil, W, H, function(phase, x, y)
-        if phase == true then
-            recordInput("touch", "evdev", string.format("%.0f,%.0f", x, y))
-            beginFromTap(x, y)
-        elseif phase == "move" and touchGoal and not shutdownDialog and not selftest
-            and x >= 0 and x <= W and y >= FIELD_TOP and y <= H then
-            local cx, cy = clampPlay(x, y)
-            touchGoal.x, touchGoal.y = cx, cy
-        end
+        noteFinger(phase, x, y)
     end)
     if not evOk then
         print("evdev: off (" .. tostring(evErr) .. ")")
@@ -589,6 +583,19 @@ local function duplicateTap(x, y)
     end
     lastTapAt, lastTapX, lastTapY = now, x, y
     return false
+end
+
+function noteFinger(phase, x, y)
+    if phase == false then
+        if finger then finger.down = false end
+        return
+    end
+    local wasDown = finger and finger.down
+    finger = {x = x, y = y, down = true}
+    if phase == "move" and wasDown then return end
+    recordInput("touch", "info", string.format("%.0f,%.0f", x, y))
+    print(string.format("touch: info %.0f,%.0f", x, y))
+    io.stdout:flush()
 end
 
 function beginFromTap(x, y)
@@ -828,15 +835,11 @@ end
 function love.touchpressed(id, x, y)
     local gx, gy = toGame(x, y)
     recordInput("touch", id, string.format("%.0f,%.0f", gx, gy))
-    beginFromTap(gx, gy)
+    noteFinger(true, gx, gy)
 end
 
 function love.touchmoved(id, x, y)
-    if not touchGoal or shutdownDialog or selftest then return end
-    local gx, gy = toGame(x, y)
-    if gx < 0 or gx > W or gy < FIELD_TOP or gy > H then return end
-    local cx, cy = clampPlay(gx, gy)
-    touchGoal.x, touchGoal.y = cx, cy
+    noteFinger("move", toGame(x, y))
 end
 
 function love.mousepressed(x, y, button)
@@ -844,7 +847,7 @@ function love.mousepressed(x, y, button)
     recordInput("mouse", button, string.format("%.0f,%.0f", gx, gy))
     if button ~= 1 then return end
     if love.touch and #love.touch.getTouches() > 0 then return end
-    beginFromTap(gx, gy)
+    noteFinger(true, gx, gy)
 end
 
 -- === 绘制 ===
@@ -1301,6 +1304,23 @@ local function drawInfoScreen()
         drawMicPanel()
     end
     drawHint(true)
+    drawFingerMark()
+end
+
+function drawFingerMark()
+    if not finger then return end
+    local x, y = finger.x, finger.y
+    color(finger.down and "gold" or "mint")
+    love.graphics.setLineWidth(4)
+    love.graphics.circle("line", x, y, 36)
+    love.graphics.line(x - 56, y, x + 56, y)
+    love.graphics.line(x, y - 56, x, y + 56)
+    love.graphics.setLineWidth(1)
+    color("pink")
+    love.graphics.circle("fill", x, y, 10)
+    color("cream")
+    love.graphics.setFont(fonts[16])
+    love.graphics.print(string.format("TOUCH  %.0f, %.0f", x, y), math.min(x + 20, W - 160), math.min(y + 20, H - 28))
 end
 
 function love.draw()
@@ -1353,6 +1373,7 @@ function love.draw()
     if hud.external then
         subscreen.present(drawInfoScreen)
     else
+        drawFingerMark()
         drawHint()
     end
 
