@@ -22,13 +22,15 @@ The device needs LÖVE 11.5 at `/opt/love/love-11.5`. `deploy.sh` copies that in
 
 `rgds` is the SSH host (`rgds.local`). That copies the app to `/mnt/mmc/Roms/APPS/RGDS-Agents/` and writes the menu entry `/mnt/mmc/Roms/APPS/RGDS-Agents.sh`.
 
-Launch it from the device APPS menu. With the menu already up:
+Launch it from the device APPS menu. With the menu already up (`muos2.bin` running):
 
 ```sh
 ssh rgds /mnt/mmc/Roms/APPS/RGDS-Agents/run-via-menu.sh
 ```
 
-Do not SSH the menu script itself. The menu still holds the audio device and the gamepad.
+That script sends `SIGINT` to `muos2.bin`. The menu exits 0, `dmenu_ln` runs `/tmp/.next`, and the menu releases ALSA and the gamepad. `SIGKILL` on `muos2.bin` skips `/tmp/.next`.
+
+To relaunch while the game is in front, `SIGTERM` its `love` process and wait until `muos2.bin` is back, then run the script again. The script refuses to start when the menu is not running. The game log is `/tmp/RGDS-Agents.log`.
 
 ## API key
 
