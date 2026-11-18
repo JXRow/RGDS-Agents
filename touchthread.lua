@@ -1,5 +1,6 @@
 -- 后台读 GT911。主线程只取最新坐标，I2C 等待不再拖住这一帧。
 
+require("love.timer")
 local ffi = require("ffi")
 local bit = require("bit")
 
