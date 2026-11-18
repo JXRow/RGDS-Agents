@@ -43,6 +43,7 @@ local touchGoal = nil
 local finger = nil
 local lastTapAt, lastTapX, lastTapY = -10, 0, 0
 local evdev = require("evdev")
+local touchpoll = require("touchpoll")
 local beginFromTap
 local clampPlay
 local INPUT_LOG = "/tmp/rgds-input-v2.log"
@@ -524,6 +525,13 @@ function love.load()
         io.stdout:flush()
     end
     installTouchWatch()
+    local tpOk, tpErr = touchpoll.open(function(phase, x, y)
+        noteFinger(phase, x, y)
+    end)
+    if not tpOk then
+        print("touchpoll: off (" .. tostring(tpErr) .. ")")
+        io.stdout:flush()
+    end
 
     if selftest then
         love.filesystem.write("selftest.txt", "")
@@ -540,6 +548,7 @@ end
 
 function love.quit()
     evdev.close()
+    touchpoll.close()
     micwave.stop()
     stt.stop()
     aid.stop()
@@ -707,6 +716,7 @@ end
 
 function love.update(dt)
     evdev.pump()
+    touchpoll.pump()
     pollNet(dt)
     micwave.update(dt)
     stt.update()
