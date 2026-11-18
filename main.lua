@@ -11,6 +11,7 @@
 --     回复留在信息面板，长回复在这块屏上换行，十字键上下滚动；流式输出时跟着最新一行。
 --     主屏只留开头一两行，大约 5 秒。语音识别保持离线。
 --     助手、密钥或网络挂了，游戏照常跑，信息面板写明原因。
+--     gt9xx-0 的触摸在信息屏上。手指按下时在这块屏上画十字，并在日志里写一行。手柄保留。
 
 local W, H = 640, 480
 local windowW, windowH = W, H
@@ -38,6 +39,13 @@ local aid = require("aid")
 local aidSeen = 0
 local PTT_BUTTON = 6                     -- R1：A/B/START/SELECT 已占用，食指按住不影响移动和 A
 local ptt = {held = false, bgmPaused = false}
+local touchGoal = nil
+local finger = nil
+local lastTapAt, lastTapX, lastTapY = -10, 0, 0
+local evdev = require("evdev")
+local touchpoll = require("touchpoll")
+local beginFromTap
+local clampPlay
 local INPUT_LOG = "/tmp/rgds-input-v2.log"
 local shotRequested = false
 local shotTaken = false
@@ -91,6 +99,7 @@ local function reset()
     score = 0
     started = false
     pulse = 0
+    touchGoal = nil
     spawnSeed()
     if audio.bgm then audio.bgm:stop() end
 end
@@ -398,6 +407,50 @@ local function loadCjkFont(size)
     return nil
 end
 
+local sdlWatch
+
+function installTouchWatch()
+    local ffi = require("ffi")
+    local ok, err = pcall(function()
+        ffi.cdef[[
+            typedef int (*rgds_event_watch)(void *userdata, void *event);
+            void SDL_AddEventWatch(rgds_event_watch filter, void *userdata);
+        ]]
+    end)
+    if not ok and not tostring(err):find("attempt to redefine", 1, true) then
+        print("touch: sdl cdef " .. tostring(err))
+        io.stdout:flush()
+        return
+    end
+    local function onEvent(_, event)
+        local base = ffi.cast("uint8_t*", event)
+        local typ = ffi.cast("uint32_t*", base)[0]
+        if typ < 0x700 or typ > 0x702 then return 0 end
+        local x = ffi.cast("float*", base + 24)[0]
+        local y = ffi.cast("float*", base + 28)[0]
+        local win = ffi.cast("uint32_t*", base + 44)[0]
+        if not (x > 1.5 or y > 1.5) then
+            x, y = x * W, y * H
+        end
+        print(string.format("touch: sdl %d %.0f,%.0f win %d", typ, x, y, win))
+        io.stdout:flush()
+        if typ == 0x701 then
+            noteFinger(false, x, y)
+        elseif typ == 0x702 then
+            noteFinger("move", x, y)
+        else
+            noteFinger(true, x, y)
+        end
+        return 0
+    end
+    local hooked, hookErr = pcall(function()
+        sdlWatch = ffi.cast("rgds_event_watch", onEvent)
+        ffi.C.SDL_AddEventWatch(sdlWatch, nil)
+    end)
+    print("touch: sdl watch " .. (hooked and "on" or tostring(hookErr)))
+    io.stdout:flush()
+end
+
 function love.load()
     love.graphics.setDefaultFilter("nearest", "nearest")
     for _, size in ipairs({8, 9, 10, 11, 12, 14, 16, 20, 22, 28}) do
@@ -463,6 +516,23 @@ function love.load()
     for _ = 1, 24 do addPetal() end
     reset()
 
+    -- Weston 不把 gt9xx-0 派发给 SDL。信息屏的点按从 event1 直接读。
+    local evOk, evErr = evdev.open(nil, W, H, function(phase, x, y)
+        noteFinger(phase, x, y)
+    end)
+    if not evOk then
+        print("evdev: off (" .. tostring(evErr) .. ")")
+        io.stdout:flush()
+    end
+    installTouchWatch()
+    local tpOk, tpErr = touchpoll.open(function(phase, x, y)
+        noteFinger(phase, x, y)
+    end)
+    if not tpOk then
+        print("touchpoll: off (" .. tostring(tpErr) .. ")")
+        io.stdout:flush()
+    end
+
     if selftest then
         love.filesystem.write("selftest.txt", "")
         probeNet()
@@ -477,6 +547,8 @@ function love.resize(width, height)
 end
 
 function love.quit()
+    evdev.close()
+    touchpoll.close()
     micwave.stop()
     stt.stop()
     aid.stop()
@@ -546,6 +618,55 @@ local function layoutChat()
     end
 end
 
+local function toGame(x, y)
+    local ww = math.max(1, love.graphics.getWidth())
+    local wh = math.max(1, love.graphics.getHeight())
+    return x * W / ww, y * H / wh
+end
+
+function clampPlay(x, y)
+    return math.max(32, math.min(W - 32, x)),
+        math.max(PLAYER_MIN_Y, math.min(PLAYER_MAX_Y, y))
+end
+
+-- 同一次点按在 Wayland 上经常先到 touch 再到 mouse，80ms 内的同一落点只处理一次。
+local function duplicateTap(x, y)
+    local now = love.timer.getTime()
+    if now - lastTapAt < 0.08 and math.abs(x - lastTapX) < 12 and math.abs(y - lastTapY) < 12 then
+        return true
+    end
+    lastTapAt, lastTapX, lastTapY = now, x, y
+    return false
+end
+
+function noteFinger(phase, x, y)
+    if phase == false then
+        if finger then finger.down = false end
+        return
+    end
+    local wasDown = finger and finger.down
+    finger = {x = x, y = y, down = true}
+    if phase == "move" and wasDown then return end
+    recordInput("touch", "info", string.format("%.0f,%.0f", x, y))
+    print(string.format("touch: info %.0f,%.0f", x, y))
+    io.stdout:flush()
+end
+
+function beginFromTap(x, y)
+    if shutdownDialog or selftest then return end
+    if duplicateTap(x, y) then return end
+    if not started then
+        started = true
+        playSfx("start")
+        startBgm()
+    end
+    if x < 0 or x > W or y < FIELD_TOP or y > H then return end
+    local gx, gy = clampPlay(x, y)
+    touchGoal = {x = gx, y = gy}
+    print(string.format("touch: walk %.0f,%.0f", gx, gy))
+    io.stdout:flush()
+end
+
 local function nudgeChat(dir)
     if dir < 0 then
         if chatScroll <= 0 then return end
@@ -594,6 +715,8 @@ local function pollChatScroll()
 end
 
 function love.update(dt)
+    evdev.pump()
+    touchpoll.pump()
     pollNet(dt)
     micwave.update(dt)
     stt.update()
@@ -616,9 +739,14 @@ function love.update(dt)
         time = time + dt
         return
     end
-    -- 标题画面原本降到 ~6 fps 省电；麦克风在线时波形要实时刷新，就不降
-    if not started and not micwave.isLive() then
-        love.timer.sleep(0.15)
+    -- 标题画面原本降到 ~6 fps 省电。手指在信息屏上时不能睡，否则十字会一顿一顿。
+    if not started and not micwave.isLive() and not (finger and finger.down) then
+        local wake = love.timer.getTime() + 0.15
+        while love.timer.getTime() < wake do
+            touchpoll.pump()
+            if finger and finger.down then break end
+            love.timer.sleep(0.016)
+        end
     end
 
     time = time + dt
@@ -664,6 +792,22 @@ function love.update(dt)
     if isDown({"right", "d"}) then dx = dx + 1 end
     if not lockV and isDown({"up", "w"}) then dy = dy - 1 end
     if not lockV and isDown({"down", "s"}) then dy = dy + 1 end
+
+    if shutdownDialog then
+        touchGoal = nil
+    elseif dx ~= 0 or dy ~= 0 then
+        touchGoal = nil
+    elseif touchGoal and started then
+        local vx, vy = touchGoal.x - player.x, touchGoal.y - player.y
+        local dist = math.sqrt(vx * vx + vy * vy)
+        local step = player.speed * dt
+        if dist <= math.max(6, step) then
+            player.x, player.y = touchGoal.x, touchGoal.y
+            touchGoal = nil
+        else
+            dx, dy = vx / dist, vy / dist
+        end
+    end
 
     local length = math.sqrt(dx * dx + dy * dy)
     if length > 1 then dx, dy = dx / length, dy / length end
@@ -749,11 +893,21 @@ function love.joystickaxis(joy, axis, value)
 end
 
 function love.touchpressed(id, x, y)
-    recordInput("touch", id, string.format("%.0f,%0.f", x, y))
+    local gx, gy = toGame(x, y)
+    recordInput("touch", id, string.format("%.0f,%.0f", gx, gy))
+    noteFinger(true, gx, gy)
+end
+
+function love.touchmoved(id, x, y)
+    noteFinger("move", toGame(x, y))
 end
 
 function love.mousepressed(x, y, button)
-    recordInput("mouse", button, string.format("%.0f,%0.f", x, y))
+    local gx, gy = toGame(x, y)
+    recordInput("mouse", button, string.format("%.0f,%.0f", gx, gy))
+    if button ~= 1 then return end
+    if love.touch and #love.touch.getTouches() > 0 then return end
+    noteFinger(true, gx, gy)
 end
 
 -- === 绘制 ===
@@ -837,6 +991,12 @@ local function drawGame()
     color("gold")
     love.graphics.circle("fill", seed.x, seed.y + 7 + seedBob, 3.5)
 
+    if touchGoal then
+        color("mint", 0.85)
+        love.graphics.circle("line", touchGoal.x, touchGoal.y, 10)
+        love.graphics.circle("fill", touchGoal.x, touchGoal.y, 2.5)
+    end
+
     for _, point in ipairs(player.trail) do
         if point.life > 0 then
             color("mint", point.life * 0.3)
@@ -900,9 +1060,9 @@ local function drawHint(info)
     love.graphics.setFont(fonts[9])
     local hint
     if info and aid.hasLog() then
-        hint = "D-PAD UP  OLDER   ·   D-PAD DOWN  NEWER   ·   HOLD R1 TALK   ·   SELECT QUIT"
+        hint = "D-PAD UP  OLDER   ·   D-PAD DOWN  NEWER   ·   TAP WALK   ·   HOLD R1 TALK   ·   SELECT QUIT"
     elseif hud.external then
-        hint = "HAT MOVE  ·  A START  ·  B NET  ·  HOLD R1 TALK  ·  SELECT QUIT  ·  R RESTART"
+        hint = "HAT OR TAP WALK  ·  A START  ·  B NET  ·  HOLD R1 TALK  ·  SELECT QUIT  ·  R RESTART"
     else
         hint = "HAT MOVE  ·  A START  ·  B NET  ·  SELECT QUIT  ·  R RESTART"
     end
@@ -1204,6 +1364,24 @@ local function drawInfoScreen()
         drawMicPanel()
     end
     drawHint(true)
+    drawFingerMark()
+end
+
+function drawFingerMark()
+    touchpoll.pump()
+    if not finger then return end
+    local x, y = finger.x, finger.y
+    color(finger.down and "gold" or "mint")
+    love.graphics.setLineWidth(4)
+    love.graphics.circle("line", x, y, 36)
+    love.graphics.line(x - 56, y, x + 56, y)
+    love.graphics.line(x, y - 56, x, y + 56)
+    love.graphics.setLineWidth(1)
+    color("pink")
+    love.graphics.circle("fill", x, y, 10)
+    color("cream")
+    love.graphics.setFont(fonts[16])
+    love.graphics.print(string.format("TOUCH  %.0f, %.0f", x, y), math.min(x + 20, W - 160), math.min(y + 20, H - 28))
 end
 
 function love.draw()
@@ -1231,7 +1409,7 @@ function love.draw()
         drawRoundedBox(200, top + 80, 240, 44, 14, "gold")
         color("ink")
         love.graphics.setFont(fonts[14])
-        love.graphics.printf("PRESS  A  /  START", 200, top + 94, 240, "center")
+        love.graphics.printf("TAP  OR  PRESS  A", 200, top + 94, 240, "center")
     end
 
     if not hud.external then
@@ -1256,6 +1434,7 @@ function love.draw()
     if hud.external then
         subscreen.present(drawInfoScreen)
     else
+        drawFingerMark()
         drawHint()
     end
 

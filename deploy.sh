@@ -7,6 +7,7 @@
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/main.lua
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/conf.lua
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/subscreen.lua     ← 第二块屏上的信息面板窗口
+#   /mnt/mmc/Roms/APPS/RGDS-Agents/evdev.lua         ← 下屏触摸（event1），Weston 不把点按派给 SDL
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/micwave.lua       ← 麦克风波形/电平/按键录音（主线程）
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/micthread.lua     ← 录音线程（OpenAL → 共享环形缓冲）
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/alsoft.conf       ← OpenAL 私有配置：录音走 dsnoop（启动脚本 export ALSOFT_CONF）
@@ -34,7 +35,7 @@ SCRIPT="$APPS/$NAME.sh"
 echo ">> 目标: $TARGET"
 echo ">> 复制应用代码"
 ssh "$TARGET" "mkdir -p '$GAME/bin' '$GAME/lib' '$APPS/Imgs'"
-scp -q main.lua conf.lua subscreen.lua micwave.lua micthread.lua stt.lua sttthread.lua aid.lua aidthread.lua rgds-aid.py alsoft.conf run-via-menu.sh "$TARGET:$GAME/"
+scp -q main.lua conf.lua subscreen.lua evdev.lua touchpoll.lua touchthread.lua micwave.lua micthread.lua stt.lua sttthread.lua aid.lua aidthread.lua rgds-aid.py alsoft.conf run-via-menu.sh "$TARGET:$GAME/"
 ssh "$TARGET" "chmod +x '$GAME/run-via-menu.sh'"
 
 if [ -f fonts/SourceHanSansCN-Regular.otf ]; then
