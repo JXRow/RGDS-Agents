@@ -406,6 +406,50 @@ local function loadCjkFont(size)
     return nil
 end
 
+local sdlWatch
+
+function installTouchWatch()
+    local ffi = require("ffi")
+    local ok, err = pcall(function()
+        ffi.cdef[[
+            typedef int (*rgds_event_watch)(void *userdata, void *event);
+            void SDL_AddEventWatch(rgds_event_watch filter, void *userdata);
+        ]]
+    end)
+    if not ok and not tostring(err):find("attempt to redefine", 1, true) then
+        print("touch: sdl cdef " .. tostring(err))
+        io.stdout:flush()
+        return
+    end
+    local function onEvent(_, event)
+        local base = ffi.cast("uint8_t*", event)
+        local typ = ffi.cast("uint32_t*", base)[0]
+        if typ < 0x700 or typ > 0x702 then return 0 end
+        local x = ffi.cast("float*", base + 24)[0]
+        local y = ffi.cast("float*", base + 28)[0]
+        local win = ffi.cast("uint32_t*", base + 44)[0]
+        if not (x > 1.5 or y > 1.5) then
+            x, y = x * W, y * H
+        end
+        print(string.format("touch: sdl %d %.0f,%.0f win %d", typ, x, y, win))
+        io.stdout:flush()
+        if typ == 0x701 then
+            noteFinger(false, x, y)
+        elseif typ == 0x702 then
+            noteFinger("move", x, y)
+        else
+            noteFinger(true, x, y)
+        end
+        return 0
+    end
+    local hooked, hookErr = pcall(function()
+        sdlWatch = ffi.cast("rgds_event_watch", onEvent)
+        ffi.C.SDL_AddEventWatch(sdlWatch, nil)
+    end)
+    print("touch: sdl watch " .. (hooked and "on" or tostring(hookErr)))
+    io.stdout:flush()
+end
+
 function love.load()
     love.graphics.setDefaultFilter("nearest", "nearest")
     for _, size in ipairs({8, 9, 10, 11, 12, 14, 16, 20, 22, 28}) do
@@ -479,6 +523,7 @@ function love.load()
         print("evdev: off (" .. tostring(evErr) .. ")")
         io.stdout:flush()
     end
+    installTouchWatch()
 
     if selftest then
         love.filesystem.write("selftest.txt", "")

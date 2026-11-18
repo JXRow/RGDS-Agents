@@ -65,8 +65,11 @@ function M.open(path, width, height, callback)
     M.swap = limY.max > limX.max
     M.W, M.H = width or M.W, height or M.H
     onPointer = callback
-    print(string.format("evdev: open %s X[%d..%d] Y[%d..%d] swap=%s",
-        path, limX.min, limX.max, limY.min, limY.max, tostring(M.swap)))
+    -- 不抢占的话读到的一直是 EAGAIN，事件留在 Weston 那个 fd 里。
+    local grab = ffi.C.ioctl(fd, 0x40044590, ffi.cast("void*", 1))
+    print(string.format("evdev: open %s X[%d..%d] Y[%d..%d] swap=%s grab=%s",
+        path, limX.min, limX.max, limY.min, limY.max, tostring(M.swap),
+        grab == 0 and "ok" or tostring(grab)))
     io.stdout:flush()
     return true
 end
@@ -157,6 +160,7 @@ end
 
 function M.close()
     if fd >= 0 then
+        ffi.C.ioctl(fd, 0x40044590, ffi.cast("void*", 0))
         ffi.C.close(fd)
         fd = -1
     end
