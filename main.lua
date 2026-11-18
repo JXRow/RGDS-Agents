@@ -739,9 +739,14 @@ function love.update(dt)
         time = time + dt
         return
     end
-    -- 标题画面原本降到 ~6 fps 省电；麦克风在线时波形要实时刷新，就不降
-    if not started and not micwave.isLive() then
-        love.timer.sleep(0.15)
+    -- 标题画面原本降到 ~6 fps 省电。手指在信息屏上时不能睡，否则十字会一顿一顿。
+    if not started and not micwave.isLive() and not (finger and finger.down) then
+        local wake = love.timer.getTime() + 0.15
+        while love.timer.getTime() < wake do
+            touchpoll.pump()
+            if finger and finger.down then break end
+            love.timer.sleep(0.016)
+        end
     end
 
     time = time + dt
@@ -1363,6 +1368,7 @@ local function drawInfoScreen()
 end
 
 function drawFingerMark()
+    touchpoll.pump()
     if not finger then return end
     local x, y = finger.x, finger.y
     color(finger.down and "gold" or "mint")
