@@ -38,6 +38,23 @@ local aid = require("aid")
 local aidSeen = 0
 local PTT_BUTTON = 6                     -- R1：A/B/START/SELECT 已占用，食指按住不影响移动和 A
 local ptt = {held = false, bgmPaused = false}
+
+-- 下屏 UI 按钮(触摸坐标即信息面板像素,GT911 直读)
+local recBtn = {x = 12, y = 390, w = 616, h = 72}   -- MIC 条整条作"按住说话"触摸按钮
+local exitBtn = {x = 588, y = 6, w = 40, h = 40}    -- 右上角 ✕
+
+local function inRect(b, x, y)
+    return x >= b.x and x < b.x + b.w and y >= b.y and y < b.y + b.h
+end
+
+-- 关闭按钮符号用两条斜线画,避免字体缺字形显示成方块
+local function drawXMark(b)
+    local cx, cy, r = b.x + b.w / 2, b.y + b.h / 2, 9
+    love.graphics.setLineWidth(3)
+    love.graphics.line(cx - r, cy - r, cx + r, cy + r)
+    love.graphics.line(cx - r, cy + r, cx + r, cy - r)
+    love.graphics.setLineWidth(1)
+end
 local INPUT_LOG = "/tmp/rgds-input-v2.log"
 local shotRequested = false
 local shotTaken = false
@@ -62,6 +79,8 @@ local function color(name, alpha)
 end
 
 local subscreen = require("subscreen")
+local touchpoll = require("touchpoll")
+local evdev = require("evdev")
 local hud = {external = false, error = nil}
 
 -- 伴生模式(RGDS_AGENTS_COMPANION=1):与 RGDS-SORX 同时启动。藏掉主窗口把上屏
@@ -265,6 +284,35 @@ local function pttRelease()
     if not ptt.held then return end
     ptt.held = false
     micwave.endClip()
+end
+
+-- 下屏触摸(GT911 I2C 直读,Weston 不派发):命中 UI 按钮等效按键。
+-- 按住 MIC 条 = R1 按住说话;点右上角 ✕ = R2 退出。
+local touchFinger = nil       -- {x, y, down} 最近的手指点
+local touchHeldPtt = false   -- 手指正按在录音按钮上
+
+local function noteTouch(phase, x, y)
+    if phase == "move" then
+        if touchFinger then touchFinger.x, touchFinger.y = x, y end
+        return
+    end
+    if phase == true then
+        touchFinger = {x = x, y = y, down = true}
+        print(string.format("touch: info %.0f,%.0f", x, y))
+        io.stdout:flush()
+        if inRect(exitBtn, x, y) then
+            love.event.push("quit")
+        elseif inRect(recBtn, x, y) and not ptt.held then
+            touchHeldPtt = true
+            pttPress()
+        end
+    else
+        if touchFinger then touchFinger.down = false end
+        if touchHeldPtt then
+            touchHeldPtt = false
+            pttRelease()
+        end
+    end
 end
 
 local function pttResumeMusic()
@@ -484,6 +532,14 @@ function love.load()
     for _ = 1, 24 do addPetal() end
     reset()
 
+    -- 下屏触摸:Weston 不把 gt9xx-0 派发给 SDL,后台线程直读 GT911 I2C 寄存器。
+    -- evdev(event1)一并打开:驱动当前不写事件,留作驱动修好后的通路。
+    local tpOk, tpErr = touchpoll.open(noteTouch)
+    print("touchpoll: " .. (tpOk and "gt911 poller started" or ("off (" .. tostring(tpErr) .. ")")))
+    local evOk, evErr = evdev.open(nil, W, H, noteTouch)
+    if not evOk then print("evdev: off (" .. tostring(evErr) .. ")") end
+    io.stdout:flush()
+
     if selftest then
         love.filesystem.write("selftest.txt", "")
         probeNet()
@@ -498,6 +554,8 @@ function love.resize(width, height)
 end
 
 function love.quit()
+    evdev.close()
+    touchpoll.close()
     micwave.stop()
     stt.stop()
     aid.stop()
@@ -615,6 +673,8 @@ local function pollChatScroll()
 end
 
 function love.update(dt)
+    touchpoll.pump()
+    evdev.pump()
     pollNet(dt)
     micwave.update(dt)
     stt.update()
@@ -637,8 +697,8 @@ function love.update(dt)
         time = time + dt
         return
     end
-    -- 标题画面原本降到 ~6 fps 省电；麦克风在线时波形要实时刷新，就不降
-    if not started and not micwave.isLive() then
+    -- 标题画面原本降到 ~6 fps 省电；麦克风在线或手指按下时不睡(波形/触摸要实时)
+    if not started and not micwave.isLive() and not (touchFinger and touchFinger.down) then
         love.timer.sleep(0.15)
     end
 
@@ -895,36 +955,6 @@ local function drawSky()
     love.graphics.circle("fill", 80, 470, 150)
 end
 
-local exitBtn = {x = 588, y = 6, w = 40, h = 40}
-
-local function inRect(b, x, y)
-    return x >= b.x and x < b.x + b.w and y >= b.y and y < b.y + b.h
-end
-
--- 关闭按钮符号用两条斜线画,避免字体缺字形显示成方块
-local function drawXMark(b)
-    local cx, cy, r = b.x + b.w / 2, b.y + b.h / 2, 9
-    love.graphics.setLineWidth(3)
-    love.graphics.line(cx - r, cy - r, cx + r, cy + r)
-    love.graphics.line(cx - r, cy + r, cx + r, cy - r)
-    love.graphics.setLineWidth(1)
-end
-
-local exitBtn = {x = 588, y = 6, w = 40, h = 40}
-
-local function inRect(b, x, y)
-    return x >= b.x and x < b.x + b.w and y >= b.y and y < b.y + b.h
-end
-
--- 关闭按钮符号用两条斜线画,避免字体缺字形显示成方块
-local function drawXMark(b)
-    local cx, cy, r = b.x + b.w / 2, b.y + b.h / 2, 9
-    love.graphics.setLineWidth(3)
-    love.graphics.line(cx - r, cy - r, cx + r, cy + r)
-    love.graphics.line(cx - r, cy + r, cx + r, cy - r)
-    love.graphics.setLineWidth(1)
-end
-
 local function drawHeader()
     color("cream")
     love.graphics.setFont(fonts[22])
@@ -955,7 +985,7 @@ local function drawHint(info)
     love.graphics.setFont(fonts[9])
     local hint
     if info and aid.hasLog() then
-        hint = "D-PAD UP  OLDER   ·   D-PAD DOWN  NEWER   ·   HOLD R1 TALK   ·   R2 / X-EXIT"
+        hint = "D-PAD UP/DOWN SCROLL   ·   HOLD R1 OR TOUCH REC TO TALK   ·   R2 / X-EXIT"
     elseif hud.external then
         hint = "HAT MOVE  ·  A START  ·  B NET  ·  HOLD R1 TALK  ·  R2 / X-EXIT  ·  R RESTART"
     else
@@ -1231,9 +1261,11 @@ local function drawChatLog()
 end
 
 local function drawMicStrip()
-    local x, y, w, h = 12, 390, 616, 72
+    -- 整条 MIC 区即触摸录音按钮(recBtn):按下开始录音,松开发送;R1 同效
+    local x, y, w, h = recBtn.x, recBtn.y, recBtn.w, recBtn.h
     local live, rec = micwave.isLive(), micwave.recording
-    drawRoundedBox(x, y, w, h, 12, "ink", 0.9)
+    local pressed = rec or touchHeldPtt
+    drawRoundedBox(x, y, w, h, 12, pressed and "sky2" or "ink", 0.9)
     if rec then
         color("pink", 0.6 + 0.4 * math.sin(love.timer.getTime() * 8))
         love.graphics.setLineWidth(3)
@@ -1244,6 +1276,11 @@ local function drawMicStrip()
     love.graphics.setFont(fonts[10])
     local label = rec and string.format("REC %3.1fs", micwave.recSeconds) or "MIC"
     love.graphics.print(label, 24, y + 8)
+    if fonts.cjk then
+        love.graphics.setFont(fonts.cjk)
+        color(rec and "pink" or "cream", 0.95)
+        love.graphics.printf(rec and "松开发送" or "按住说话  ·  触摸 / R1", x, y + 6, w, "center")
+    end
     local wx, wy, ww, wh = 130, y + 28, 470, 36
     color("sky2", 0.35)
     love.graphics.rectangle("fill", wx, wy, ww, wh, 6, 6)
