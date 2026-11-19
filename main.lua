@@ -64,6 +64,11 @@ end
 local subscreen = require("subscreen")
 local hud = {external = false, error = nil}
 
+-- 伴生模式(RGDS_AGENTS_COMPANION=1):与 RGDS-SORX 同时启动。藏掉主窗口把上屏
+-- 让给游戏,只留下屏对话面板;STT 模型延迟到第一次按 R1 才加载(省开局 CPU/内存)。
+local companion = os.getenv("RGDS_AGENTS_COMPANION") == "1"
+local sttLazy, sttLazyStarted = companion, false
+
 -- 游玩区（草地区域）边界；信息面板在第二块屏时草地占满主屏
 local SHARED_FIELD_TOP = 214
 local FIELD_TOP, PLAYER_MIN_Y, PLAYER_MAX_Y
@@ -241,6 +246,12 @@ end
 -- 麦克风会拾到扬声器里的 BGM，录音期间暂停 BGM、静音音效，录完（含 0.2 s 尾巴）再恢复
 local function pttPress()
     if ptt.held or shutdownDialog then return end
+    -- 伴生模式:STT 模型(229MB,设备上加载约 21s)延迟到第一次按 R1 才加载,
+    -- 避免跟游戏抢开局 CPU/内存;此后常驻
+    if sttLazy and not sttLazyStarted then
+        sttLazyStarted = true
+        stt.start()
+    end
     if not micwave.beginClip() then return end
     aid.dismiss()
     ptt.held = true
@@ -422,7 +433,11 @@ function love.load()
             stt.submit(c.sound:getString())
         end
     end
-    stt.start()
+    if companion then
+        print("companion: STT deferred until first R1 press (RGDS_AGENTS_COMPANION=1)")
+    else
+        stt.start()
+    end
     aid.start()
     windowW, windowH = love.graphics.getWidth(), love.graphics.getHeight()
 
@@ -435,6 +450,12 @@ function love.load()
         setFieldTop(0)
         print(string.format("subscreen: info pane on display %d (main window on display %d)",
             subscreen.display, subscreen.mainDisplay))
+        if companion then
+            -- 上屏全让给游戏:藏掉主窗口。手柄键经 evdev/js0 直达 LÖVE,不依赖窗口焦点
+            if subscreen.hideMainWindow() then
+                print("companion: main window hidden, upper screen free for the game")
+            end
+        end
     else
         print("subscreen: off (" .. tostring(hud.error) .. "), info pane stays on the main screen")
     end

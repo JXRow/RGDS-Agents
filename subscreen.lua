@@ -10,6 +10,7 @@ local bit = require("bit")
 
 ffi.cdef[[
 typedef struct SDL_Window SDL_Window;
+void SDL_HideWindow(SDL_Window *window);
 typedef void *SDL_GLContext;
 typedef struct { int x, y, w, h; } SDL_Rect;
 int SDL_GetNumVideoDisplays(void);
@@ -92,6 +93,15 @@ end
 
 function M.isOpen()
     return hud ~= nil
+end
+
+-- 伴生模式:藏掉 LÖVE 主窗口,上屏整块让给游戏;只留下屏面板窗口
+function M.hideMainWindow()
+    if mainWin and SDL then
+        pcall(SDL.SDL_HideWindow, mainWin)
+        return true
+    end
+    return false
 end
 
 -- 在 love.draw 里调用；drawFn 按 640x480 坐标画面板
