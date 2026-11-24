@@ -563,16 +563,19 @@ local chatStick = true
 local chatView = 1
 local chatMax = 0
 local chatEpoch = 0
+local chatRev = -1
 local chatOverflow = false
 local scrollArm = nil
 
 local function layoutChat()
+    if chatRev == aid.rev then return end
+    if aid.hasLog() and not (fonts.cjk or fonts[16]) then return end
+    chatRev = aid.rev
     chatLines = {}
     chatOverflow = false
     chatMax = 0
     if not aid.hasLog() then return end
     local font = fonts.cjk or fonts[16]
-    if not font then return end
     love.graphics.setFont(font)
     local lh = font:getHeight()
     local boxH = aid.setup and (CHAT_H - 18) or CHAT_H
@@ -606,8 +609,14 @@ local function layoutChat()
             pushWrapped("AI  ", body, "cream", 1)
             local toolLine = aid.toolText(turn.tool)
             if toolLine then
-                local alpha = turn.tool.status == "running" and 1 or 0.62
-                pushWrapped("    ", toolLine, "gold", alpha)
+                local tag = body == "" and "AI  " or "    "
+                local textColor, alpha = "gold", 0.62
+                if turn.tool.status == "error" then
+                    textColor, alpha = "pink", 1
+                elseif turn.live and turn.tool.status == "running" then
+                    alpha = 1
+                end
+                pushWrapped(tag, toolLine, textColor, alpha)
             end
             if turn.err and turn.err ~= "" then
                 pushWrapped("    ", turn.err, "pink", 1)
@@ -726,11 +735,11 @@ function love.update(dt)
     pollNet(dt)
     micwave.update(dt)
     stt.update()
+    aid.update()
     if stt.serial ~= aidSeen then
         aidSeen = stt.serial
         if stt.text and stt.text ~= "" then aid.chat(stt.text, stt.lang) end
     end
-    aid.update()
     pttResumeMusic()
     if shotRequested and shotStage < 4 then
         shotFrames = shotFrames + 1
@@ -747,11 +756,15 @@ function love.update(dt)
     end
     -- 标题画面原本降到 ~6 fps 省电。手指在信息屏上时不能睡，否则十字会一顿一顿。
     if not started and not micwave.isLive() and not (finger and finger.down) then
-        local wake = love.timer.getTime() + 0.15
-        while love.timer.getTime() < wake do
+        if aid.phase == "thinking" or aid.phase == "streaming" then
             touchpoll.pump()
-            if finger and finger.down then break end
-            love.timer.sleep(0.016)
+        else
+            local wake = love.timer.getTime() + 0.15
+            while love.timer.getTime() < wake do
+                touchpoll.pump()
+                if finger and finger.down then break end
+                love.timer.sleep(0.016)
+            end
         end
     end
 
@@ -981,8 +994,9 @@ local function drawSetupPanel()
     color("mint", 0.9)
     local urlFont = fonts[12]
     love.graphics.setFont(urlFont)
-    local _, urlLines = urlFont:getWrap(aid.setup.url, 420)
-    love.graphics.print(urlLines[1] or "", 176, 176)
+    local urlX = math.max(176, 84 + fonts[20]:getWidth(aid.setup.token) + 16)
+    local _, urlLines = urlFont:getWrap(aid.setup.url, math.max(40, 616 - urlX))
+    love.graphics.print(urlLines[1] or "", urlX, 176)
 end
 
 local function drawInputOrSetup()
@@ -1214,7 +1228,7 @@ local function drawAidBody(x, y, w)
         love.graphics.setFont(fonts[11])
         love.graphics.print("AI", x, y + 2)
         if tool then
-            printWrapped(fonts[11], tool, x + 28, y + 2, w - 28, 1)
+            printWrapped(fonts.cjk or fonts[11], tool, x + 28, y + 2, w - 28, 1)
         else
             love.graphics.setFont(fonts.cjk or fonts[16])
             love.graphics.print(fonts.cjk and "…" or "...", x + 28, y)
@@ -1233,7 +1247,7 @@ local function drawAidBody(x, y, w)
         love.graphics.print("AI", x, y + 2)
         local textY = y
         if tool then
-            printWrapped(fonts[11], tool, x + 28, y + 2, w - 28, 1)
+            printWrapped(fonts.cjk or fonts[11], tool, x + 28, y + 2, w - 28, 1)
             textY = y + 16
         end
         if aid.reply ~= "" then

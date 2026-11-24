@@ -22,10 +22,14 @@ local function openal()
 end
 local F = {threads = {}, threadCpu = 0, meshUploads = 0}
 
+F.clockOffset = 0
 function F.now()
     local ts = ffi.new("struct rgds_timespec")
     ffi.C.clock_gettime(1, ts)
-    return tonumber(ts.tv_sec) + tonumber(ts.tv_nsec) * 1e-9
+    return tonumber(ts.tv_sec) + tonumber(ts.tv_nsec) * 1e-9 + F.clockOffset
+end
+function F.advance(seconds)
+    F.clockOffset = F.clockOffset + seconds
 end
 function F.realSleep(s)
     ffi.C.nanosleep(ffi.new("struct rgds_timespec", 0, s * 1e9), nil)
