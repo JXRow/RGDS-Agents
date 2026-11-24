@@ -14,6 +14,12 @@ if [ -z "$(pidof muos2.bin)" ]; then
     exit 1
 fi
 
+love_pid=$(pgrep -f "^$LOVE_BIN" | head -n 1 || true)
+if [ -n "$love_pid" ]; then
+    echo "!! love 已在运行 (PID $love_pid)。要重新启动，先对该进程发 SIGTERM，等 muos2.bin 在运行后再执行本脚本。日志 /tmp/RGDS-Agents.log" >&2
+    exit 1
+fi
+
 trap '' HUP
 "$APP_SH" "$@" >/dev/null 2>&1 &
 trap - HUP

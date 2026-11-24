@@ -7,12 +7,14 @@ work=$(mktemp -d)
 keep_decoy=
 start_decoy=
 menu_pid=
+term_launch=
 
 cleanup() {
     status=$?
     [ -n "$keep_decoy" ] && /bin/kill "$keep_decoy" 2>/dev/null || true
     [ -n "$start_decoy" ] && /bin/kill "$start_decoy" 2>/dev/null || true
     [ -n "$menu_pid" ] && /bin/kill "$menu_pid" 2>/dev/null || true
+    [ -n "$term_launch" ] && /bin/kill "$term_launch" 2>/dev/null || true
     rm -rf "$work"
     exit "$status"
 }
@@ -60,26 +62,34 @@ while [ "$(date +%s)" -le "$deadline" ]; do
     sleep 0.05
 done
 printf 'app %s timeout\n' "$$" >> "$ORDER"
-exit 4
+exit 5
 EOF
 cat > "$work/app-missing" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" > "$MARKER"
 exit 6
 EOF
+cat > "$work/app-stay" <<'EOF'
+#!/bin/sh
+trap 'exit 0' INT TERM
+printf 'app %s\n' "$$" >> "$ORDER"
+fifo=$ORDER.stay.fifo
+mkfifo "$fifo"
+read _ < "$fifo"
+EOF
 cat > "$work/menu" <<'EOF'
 #!/bin/sh
+trap 'exit 0' INT TERM
 state=present
 if [ ! -e "$RGDS_NEXT" ]; then
     state=absent
 fi
 printf 'menu %s %s\n' "$$" "$state" >> "$ORDER"
-trap 'exit 0' INT TERM
 fifo=$ORDER.fifo
 mkfifo "$fifo"
 read _ < "$fifo"
 EOF
-chmod +x "$work/app-keep" "$work/app-start" "$work/app-missing" "$work/menu"
+chmod +x "$work/app-keep" "$work/app-start" "$work/app-missing" "$work/app-stay" "$work/menu"
 
 export PATH="$bin:$PATH"
 export KILL_LOG=$kill_log
@@ -132,6 +142,7 @@ plan_out=$(
 [ -f "$start_next" ] || fail "plan removed RGDS_NEXT"
 start_status=0
 start_err=$work/start.err
+: > "$kill_log"
 start_stdout=$(
     RGDS_PIDOF=$bin/pidof-none \
     RGDS_MENU_BIN=$work/menu \
@@ -140,6 +151,7 @@ start_stdout=$(
     "$launch" run -- "$work/app-start" 2>"$start_err"
 ) || start_status=$?
 [ "$start_status" -eq 4 ] || fail "start status $start_status"
+[ -z "$start_stdout" ] || fail "start stdout [$start_stdout]"
 [ ! -s "$start_err" ] || fail "start stderr [$(cat "$start_err")]"
 [ -f "$start_order" ] || fail "start order log missing"
 menu_line=$(grep '^menu ' "$start_order" | head -n 1)
@@ -152,7 +164,10 @@ menu_state=$3
 set -- $app_line
 app_pid=$2
 [ "$menu_state" = "absent" ] || fail "menu saw RGDS_NEXT ($menu_state)"
-[ "$menu_pid" -lt "$app_pid" ] || fail "menu pid $menu_pid is not before app pid $app_pid"
+grep -F -x -- "-TERM $menu_pid" "$kill_log" >/dev/null || fail "kill log [$(cat "$kill_log")]"
+if grep -F -- "$start_decoy" "$kill_log" >/dev/null; then
+    fail "start killed decoy [$(cat "$kill_log")]"
+fi
 first=$(head -n 1 "$start_order")
 second=$(sed -n '2p' "$start_order")
 [ "$first" = "$menu_line" ] || fail "order log first line [$first]"
@@ -196,5 +211,53 @@ MARKER=$usage_marker "$launch" run "$work/app-missing" >"$work/usage.out" 2>"$wo
 usage_status=0
 "$launch" run >"$work/usage2.out" 2>"$work/usage2.err" || usage_status=$?
 [ "$usage_status" -eq 2 ] || fail "run with no args status $usage_status"
+
+term_order=$work/term.order
+term_next=$work/term.next
+printf 'sentinel\n' > "$term_next"
+: > "$term_order"
+RGDS_PIDOF=$bin/pidof-none \
+RGDS_MENU_BIN=$work/menu \
+RGDS_NEXT=$term_next \
+ORDER=$term_order \
+"$launch" run -- "$work/app-stay" >"$work/term.out" 2>"$work/term.err" &
+term_launch=$!
+deadline=$(($(date +%s) + 3))
+while [ "$(date +%s)" -le "$deadline" ]; do
+    if grep -q '^menu ' "$term_order" 2>/dev/null && grep -q '^app ' "$term_order" 2>/dev/null; then
+        break
+    fi
+    sleep 0.05
+done
+grep -q '^menu ' "$term_order" || fail "term test menu did not start [$(cat "$term_err" 2>/dev/null)]"
+grep -q '^app ' "$term_order" || fail "term test app did not start"
+/bin/kill -TERM "$term_launch"
+term_status=0
+wait "$term_launch" || term_status=$?
+term_launch=
+[ "$term_status" -ne 0 ] || fail "TERM exit status $term_status"
+set -- $(grep '^menu ' "$term_order" | head -n 1)
+term_menu=$2
+set -- $(grep '^app ' "$term_order" | head -n 1)
+term_app=$2
+deadline=$(($(date +%s) + 2))
+while [ "$(date +%s)" -le "$deadline" ]; do
+    if [ ! -d "/proc/$term_menu" ] && [ ! -d "/proc/$term_app" ]; then
+        break
+    fi
+    sleep 0.05
+done
+[ ! -d "/proc/$term_menu" ] || fail "term menu $term_menu still alive"
+[ ! -d "/proc/$term_app" ] || fail "term app $term_app still alive"
+
+dir_menu=$work/menu-dir
+mkdir -p "$dir_menu"
+chmod +x "$dir_menu"
+plan_out=$(
+    RGDS_PIDOF=$bin/pidof-none \
+    RGDS_MENU_BIN=$dir_menu \
+    "$launch" plan
+)
+[ "$plan_out" = "missing" ] || fail "plan directory: [$plan_out]"
 
 printf '%s\n' "screen-launch ok"

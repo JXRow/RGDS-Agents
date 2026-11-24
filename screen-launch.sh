@@ -11,7 +11,7 @@ menu_running() {
 
 menu_bin() {
     if [ -n "${RGDS_MENU_BIN+x}" ]; then
-        if [ -x "$RGDS_MENU_BIN" ]; then
+        if [ -f "$RGDS_MENU_BIN" ] && [ -x "$RGDS_MENU_BIN" ]; then
             printf '%s\n' "$RGDS_MENU_BIN"
             return 0
         fi
@@ -22,12 +22,39 @@ menu_bin() {
         /mnt/vendor/bin/muos2.bin \
         /usr/bin/muos2.bin
     do
-        if [ -x "$candidate" ]; then
+        if [ -f "$candidate" ] && [ -x "$candidate" ]; then
             printf '%s\n' "$candidate"
             return 0
         fi
     done
     return 1
+}
+
+pid_alive() {
+    [ -d "/proc/$1" ] || return 1
+    state=$(awk '/^State:/ { print $2 }' "/proc/$1/status" 2>/dev/null || true)
+    [ -n "$state" ] && [ "$state" != "Z" ]
+}
+
+stop_pid() {
+    pid=$1
+    [ -n "$pid" ] || return 0
+    env kill -TERM "$pid" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 40 ]; do
+        if ! pid_alive "$pid"; then
+            wait "$pid" 2>/dev/null || true
+            return 0
+        fi
+        if [ "$i" -eq 20 ]; then
+            env kill -KILL "$pid" 2>/dev/null || true
+        fi
+        sleep 0.05
+        i=$((i + 1))
+    done
+    if ! pid_alive "$pid"; then
+        wait "$pid" 2>/dev/null || true
+    fi
 }
 
 to_absolute() {
@@ -78,12 +105,15 @@ cmd_run() {
     if [ -f "$next" ]; then
         rm -f -- "$next"
     fi
-    "$bin" >/dev/null 2>&1 &
+    (cd -- "$(dirname -- "$bin")" && exec "$bin") >/dev/null 2>&1 &
     menu_pid=$!
-    "$@"
+    "$@" &
+    app_pid=$!
+    trap 'env kill -TERM "$app_pid" "$menu_pid" 2>/dev/null || true; exit 1' INT TERM HUP
+    wait "$app_pid"
     status=$?
-    env kill -TERM "$menu_pid" 2>/dev/null || true
-    wait "$menu_pid" 2>/dev/null || true
+    trap - INT TERM HUP
+    stop_pid "$menu_pid"
     return "$status"
 }
 

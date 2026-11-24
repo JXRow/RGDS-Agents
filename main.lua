@@ -452,10 +452,12 @@ end
 
 function love.load()
     local oneScreen = false
+    local headless = false
     for _, value in ipairs(arg or {}) do
         if value == "--selftest" then selftest = true end
         if value == "--inputlog" then inputlog = true end
         if value == "--shot" then shotRequested = true end
+        if value == "--headless" then headless = true end
         if value == "--one-screen" then
             oneScreen = true
             hud.error = "disabled by --one-screen"
@@ -467,17 +469,27 @@ function love.load()
             return screens.plan(love.window.getDisplayCount())
         end)
         if not ok then planned = screens.plan(1) end
-        screenPlan = planned
-        if screenPlan.loveDisplay ~= 1 then
-            love.window.setMode(W, H, {
-                fullscreen = true,
-                fullscreentype = "desktop",
-                borderless = true,
+        local skipPlace = headless or not love.window.isVisible()
+        if skipPlace then
+            if planned.menuSdl == nil then screenPlan = planned end
+        elseif planned.loveDisplay == 1 then
+            screenPlan = planned
+        else
+            local modeOk, _, _, flags = pcall(love.window.getMode)
+            flags = modeOk and flags or {}
+            local setOk, moved = pcall(love.window.setMode, W, H, {
+                fullscreen = flags.fullscreen,
+                fullscreentype = flags.fullscreentype,
+                borderless = flags.borderless,
                 resizable = false,
                 vsync = 1,
                 highdpi = false,
-                display = screenPlan.loveDisplay,
+                display = planned.loveDisplay,
             })
+            local checkOk, _, _, placed = pcall(love.window.getMode)
+            if setOk and moved and checkOk and placed and placed.display == planned.loveDisplay then
+                screenPlan = planned
+            end
         end
     end
 
@@ -709,6 +721,21 @@ local function nudgeChat(dir)
     end
 end
 
+-- 双屏时菜单占着上屏，本窗口是下屏。聊天、录音、识别或报错时改画信息页，
+-- 否则这些内容不会出现；平时仍画游戏。
+local function showBottomInfo()
+    if hud.external or not screenPlan or screenPlan.menuSdl == nil then
+        return false
+    end
+    return aid.hasLog()
+        or micwave.isRecording()
+        or stt.phase == "transcribing"
+        or stt.phase == "busy"
+        or aid.phase == "thinking"
+        or aid.phase == "streaming"
+        or aid.phase == "error"
+end
+
 -- 按住十字键上或下时返回 true，这一帧不再用上下移动角色
 local function pollChatScroll()
     if aid.epoch ~= chatEpoch then
@@ -800,7 +827,7 @@ function love.update(dt)
     end
 
     local dx, dy = 0, 0
-    local lockV = pollChatScroll()
+    local lockV = (hud.external or (showBottomInfo() and aid.hasLog())) and pollChatScroll()
     local joystick = love.joystick.getJoysticks()[1]
     if joystick then
         local hat = joystick:getHat(1)
@@ -1088,9 +1115,9 @@ local function drawHint(info)
     color("cream", 0.7)
     love.graphics.setFont(fonts[9])
     local hint
-    if info and aid.hasLog() then
+    if info and aid.hasLog() and (hud.external or showBottomInfo()) then
         hint = "D-PAD UP  OLDER   ·   D-PAD DOWN  NEWER   ·   TAP WALK   ·   HOLD R1 TALK   ·   SELECT QUIT"
-    elseif hud.external then
+    elseif hud.external or showBottomInfo() then
         hint = "HAT OR TAP WALK  ·  A START  ·  B NET  ·  HOLD R1 TALK  ·  SELECT QUIT  ·  R RESTART"
     else
         hint = "HAT MOVE  ·  A START  ·  B NET  ·  SELECT QUIT  ·  R RESTART"
@@ -1412,7 +1439,27 @@ function drawFingerMark()
     love.graphics.print(string.format("TOUCH  %.0f, %.0f", x, y), math.min(x + 20, W - 160), math.min(y + 20, H - 28))
 end
 
+local function drawShutdownOverlay()
+    if not shutdownDialog then return end
+    color("ink", 0.7)
+    love.graphics.rectangle("fill", 0, 0, W, H)
+    drawRoundedBox(190, 176, 260, 110, 16, "ink", 1)
+    color("gold")
+    love.graphics.setFont(fonts[22])
+    love.graphics.printf("SHUTDOWN?", 0, 196, W, "center")
+    color("cream")
+    love.graphics.setFont(fonts[11])
+    love.graphics.printf("A confirm  /  B cancel", 0, 234, W, "center")
+end
+
 function love.draw()
+    if showBottomInfo() then
+        drawInfoScreen()
+        drawShutdownOverlay()
+        if selftest then drawSelftest() end
+        return
+    end
+
     drawSky()
 
     for _, petal in ipairs(petals) do
@@ -1447,17 +1494,7 @@ function love.draw()
 
     drawSttBanner()
 
-    if shutdownDialog then
-        color("ink", 0.7)
-        love.graphics.rectangle("fill", 0, 0, W, H)
-        drawRoundedBox(190, 176, 260, 110, 16, "ink", 1)
-        color("gold")
-        love.graphics.setFont(fonts[22])
-        love.graphics.printf("SHUTDOWN?", 0, 196, W, "center")
-        color("cream")
-        love.graphics.setFont(fonts[11])
-        love.graphics.printf("A confirm  /  B cancel", 0, 234, W, "center")
-    end
+    drawShutdownOverlay()
 
     if hud.external then
         subscreen.present(drawInfoScreen)

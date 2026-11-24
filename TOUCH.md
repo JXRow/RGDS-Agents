@@ -34,7 +34,7 @@ Finger data is register `0x814E`, 16-bit address, big-endian on the wire:
 
 After a ready buffer, write `0` to `0x814E`. The chip keeps the same point until that write. Open `/dev/i2c-5` and use `I2C_RDWR` (`0x0707`): one write of the 16-bit register, then a read. Address `0x14`.
 
-x and y are info-panel pixels, origin top-left. Scale with `640 / xmax` and `480 / ymax` from the config.
+x and y are bottom-panel pixels, origin top-left. Scale with `640 / xmax` and `480 / ymax` from the config.
 
 ## Events
 
