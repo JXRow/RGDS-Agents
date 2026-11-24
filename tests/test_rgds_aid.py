@@ -115,11 +115,11 @@ class TrackerTest(unittest.TestCase):
             content="Linux\n", metadata={}, executed=True))
         self.assertEqual(events, [
             {"ev": "tool", "id": "r1", "tool": "bash", "status": "running",
-             "title": "sleep 25 && uname -a"},
+             "title": "sleep 25 && uname -a", "call_id": "t1"},
             {"ev": "tool", "id": "r1", "tool": "bash", "status": "running",
-             "title": "still running"},
+             "title": "still running", "call_id": "t1"},
             {"ev": "tool", "id": "r1", "tool": "bash", "status": "completed",
-             "title": "Linux"},
+             "title": "Linux", "call_id": "t1"},
         ])
 
     def test_tool_failed(self):
@@ -131,7 +131,8 @@ class TrackerTest(unittest.TestCase):
             assistantMessageID="m1", id="t1",
             error={"message": "exit 1"}, metadata={}, executed=True))
         self.assertEqual(out, [{
-            "ev": "tool", "id": "r1", "tool": "bash", "status": "error", "title": "exit 1",
+            "ev": "tool", "id": "r1", "tool": "bash", "status": "error",
+            "title": "exit 1", "call_id": "t1",
         }])
 
     def test_progress_without_a_title_emits_nothing(self):
@@ -146,7 +147,7 @@ class TrackerTest(unittest.TestCase):
             action="bash", resources=["/tmp"], message="rm a file"))
         self.assertEqual(out, [{
             "ev": "tool", "id": "r1", "tool": "bash", "status": "running",
-            "title": "waiting permission: rm a file",
+            "title": "waiting permission: rm a file", "call_id": "p1",
         }])
 
     def test_failed_then_idle_emits_error_only(self):
@@ -218,6 +219,7 @@ class TrackerTest(unittest.TestCase):
         self.assertEqual(self.tracker.turn.rid, "r1")
 
     def test_pc_inbox_starts_a_turn(self):
+        self.tracker.apply(_v2("session.idle", sessionID="ses_1"))
         out = []
         out += self.tracker.apply(_v2(
             "session.inbox.enqueued", sessionID="ses_1", inboxID="inb_pc",
@@ -235,10 +237,41 @@ class TrackerTest(unittest.TestCase):
         self.assertEqual(out, [
             {"ev": "remote_user", "id": "pc-inb_pc", "text": "from the desk"},
             {"ev": "start", "id": "pc-inb_pc"},
-            {"ev": "tool", "id": "pc-inb_pc", "tool": "bash", "status": "running", "title": "uname"},
+            {"ev": "tool", "id": "pc-inb_pc", "tool": "bash", "status": "running",
+             "title": "uname", "call_id": "t1"},
             {"ev": "delta", "id": "pc-inb_pc", "text": "Linux"},
             {"ev": "done", "id": "pc-inb_pc"},
         ])
+
+    def test_pc_inbox_waits_behind_the_open_turn(self):
+        queued = self.tracker.apply(_v2(
+            "session.inbox.enqueued", sessionID="ses_1", inboxID="inb_pc",
+            item={"type": "user", "payload": {"text": "from the desk", "metadata": {}}}))
+        self.assertEqual(queued, [])
+        self.assertEqual(self.tracker.turn.rid, "r1")
+        closed = self.tracker.apply(_v2("session.idle", sessionID="ses_1"))
+        self.assertEqual([ev["ev"] for ev in closed], ["done", "remote_user", "start"])
+        self.assertEqual(closed[0]["id"], "r1")
+        self.assertEqual(closed[1]["id"], "pc-inb_pc")
+        self.assertEqual(closed[1]["text"], "from the desk")
+        self.assertEqual(closed[2]["id"], "pc-inb_pc")
+
+    def test_supersede_fence_ignores_the_previous_interrupt(self):
+        extra = self.tracker.begin("r2")
+        self.assertEqual(extra[0]["id"], "r1")
+        self.assertEqual(extra[0]["kind"], "cancelled")
+        ignored = self.tracker.apply(_v2(
+            "session.execution.interrupted", sessionID="ses_1", reason="user"))
+        ignored += self.tracker.apply(_v2("session.idle", sessionID="ses_1"))
+        self.assertEqual(ignored, [])
+        self.assertFalse(self.tracker.turn.closed)
+        self.assertEqual(self.tracker.turn.rid, "r2")
+        delta = self.tracker.apply(_v2(
+            "session.text.delta", sessionID="ses_1",
+            assistantMessageID="m1", ordinal=0, delta="next"))
+        done = self.tracker.apply(_v2("session.idle", sessionID="ses_1"))
+        self.assertEqual(delta, [{"ev": "delta", "id": "r2", "text": "next"}])
+        self.assertEqual(done, [{"ev": "done", "id": "r2"}])
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -279,18 +312,46 @@ class _Handler(BaseHTTPRequestHandler):
             self._bytes(401, b"denied")
             return
         path = parsed.path
+        if mock.redirect_status and path != "/api/event":
+            self._redirect(mock)
+            return
         if path == "/api/info" and self.command == "GET":
+            if mock.fault == "info":
+                mock.fault = ""
+                self._incomplete()
+                return
             self._json(200, {
                 "version": "2.4.0", "pid": 1, "hostname": "mock",
                 "urls": [mock.url], "paths": {"tmp": "/tmp"},
             })
             return
         if path == "/api/session" and self.command == "GET":
+            if mock.list_gate is not None:
+                with mock.lock:
+                    mock.list_hits += 1
+                    hits = mock.list_hits
+                if hits >= 2 and mock.list_ready is not None:
+                    mock.list_ready.set()
+                mock.list_gate.wait(5)
             with mock.lock:
                 data = list(mock.sessions)
             self._json(200, {"data": data, "cursor": {}})
+            with mock.lock:
+                mock.lists_done += 1
             return
         if path == "/api/session" and self.command == "POST":
+            if mock.create_gate is not None:
+                with mock.lock:
+                    mock.create_holds += 1
+                    hold = mock.create_holds
+                if hold == 1:
+                    if mock.create_entered is not None:
+                        mock.create_entered.set()
+                    mock.create_gate.wait(5)
+            if mock.fault == "create":
+                mock.fault = ""
+                self._incomplete()
+                return
             directory = ""
             if isinstance(body, dict):
                 loc = body.get("location")
@@ -321,6 +382,25 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(200, {})
                 return
         self._json(404, {"message": "missing"})
+
+    def _redirect(self, mock):
+        self.send_response(mock.redirect_status)
+        self.send_header("Location", "http://127.0.0.1/stolen")
+        self.end_headers()
+        self.wfile.flush()
+        if mock.redirect_entered is not None:
+            mock.redirect_entered.set()
+        if mock.redirect_hold is not None:
+            mock.redirect_hold.wait(5)
+
+    def _incomplete(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "80")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(b"{")
+        self.close_connection = True
 
     def _json(self, code, payload):
         self._bytes(code, json.dumps(payload).encode())
@@ -374,6 +454,17 @@ class MockOpenCode:
         self.seq = 0
         self.closed = False
         self.fail_prompt = False
+        self.fault = ""
+        self.redirect_status = 0
+        self.redirect_hold = None
+        self.redirect_entered = None
+        self.list_gate = None
+        self.list_ready = None
+        self.list_hits = 0
+        self.lists_done = 0
+        self.create_gate = None
+        self.create_entered = None
+        self.create_holds = 0
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self.httpd.mock = self
         self.httpd.daemon_threads = True
@@ -513,6 +604,10 @@ class WireTest(unittest.TestCase):
         self._files = []
 
     def tearDown(self):
+        for name in ("list_gate", "create_gate", "redirect_hold"):
+            gate = getattr(self.mock, name, None)
+            if gate is not None:
+                gate.set()
         if self.client is not None:
             self.client.close()
         self.aid.stop()
@@ -577,6 +672,7 @@ class WireTest(unittest.TestCase):
         self.assertEqual(query.get("limit"), ["10"])
         self.assertEqual(query.get("parentID"), ["null"])
         self.assertEqual(query.get("archived"), ["false"])
+        self.assertGreaterEqual(self.mock.wait_opens(1), 1)
         self.mock.emit(_v2(
             "session.text.delta", sessionID="ses_new",
             assistantMessageID="m1", ordinal=0, delta="Hello"))
@@ -613,6 +709,7 @@ class WireTest(unittest.TestCase):
         client.send({"op": "cancel", "id": "r1"})
         hits = self.mock.wait_calls(lambda call: call["path"].endswith("/interrupt"))
         self.assertEqual(hits[0]["path"], "/api/session/ses_new/interrupt")
+        self.assertGreaterEqual(self.mock.wait_opens(1), 1)
         self.mock.emit(_v2(
             "session.execution.interrupted", sessionID="ses_new", reason="user"))
         self.mock.emit(_v2("session.idle", sessionID="ses_new"))
@@ -673,6 +770,7 @@ class WireTest(unittest.TestCase):
                 break
         else:
             self.fail("did not attach")
+        self.assertGreaterEqual(self.mock.wait_opens(1), 1)
         self.mock.emit(_v2(
             "session.inbox.enqueued", sessionID="ses_new", inboxID="inb_pc",
             item={"type": "user", "payload": {"text": "from the desk", "metadata": {}}}))
@@ -691,10 +789,11 @@ class WireTest(unittest.TestCase):
         tool = client.recv()
         self.assertEqual(tool["ev"], "tool")
         self.assertEqual(tool["status"], "running")
+        self.assertEqual(tool["call_id"], "t1")
         self.assertEqual(client.recv()["text"], "Linux")
         self.assertEqual(client.recv()["ev"], "done")
 
-    def test_sse_reconnects_after_the_stream_drops(self):
+    def test_sse_drop_interrupts_the_open_turn_and_reconnects(self):
         client = self.connect()
         client.send({"op": "chat", "id": "r1", "text": "go"})
         self.assertEqual(client.recv()["ev"], "start")
@@ -706,13 +805,18 @@ class WireTest(unittest.TestCase):
         with self.mock.lock:
             opens = self.mock.sse_opens
         self.mock.drop_sse()
+        err = client.recv()
+        self.assertEqual(err["ev"], "error")
+        self.assertEqual(err["id"], "r1")
+        self.assertEqual(err["kind"], "interrupted")
+        self.assertEqual(err["partial"], "A")
+        self.assertTrue(err["retryable"])
         self.assertGreaterEqual(self.mock.wait_opens(opens + 1, timeout=4), opens + 1)
         self.mock.emit(_v2(
             "session.text.delta", sessionID="ses_new",
             assistantMessageID="m1", ordinal=0, delta="B"))
         self.mock.emit(_v2("session.idle", sessionID="ses_new"))
-        self.assertEqual(client.recv()["text"], "B")
-        self.assertEqual(client.recv()["ev"], "done")
+        self.assert_quiet()
 
     def test_offline_when_opencode_is_down(self):
         probe = socket.socket()
@@ -778,6 +882,9 @@ class WireTest(unittest.TestCase):
             lambda call: call["path"].endswith("/prompt")
             and isinstance(call["body"], dict)
             and call["body"].get("metadata", {}).get("rid") == "r2")
+        self.assertGreaterEqual(self.mock.wait_opens(1), 1)
+        self.mock.emit(_v2("session.idle", sessionID="ses_new"))
+        self.assertEqual(client.recv()["ev"], "done")
         self.mock.fail_prompt = True
         client.send({"op": "chat", "id": "r3", "text": "boom"})
         first = client.recv()
@@ -842,8 +949,296 @@ class WireTest(unittest.TestCase):
         self.mock.emit(_v2("session.idle", sessionID="ses_new"))
         done_tool = client.recv(timeout=3)
         self.assertEqual(done_tool["status"], "completed")
+        self.assertEqual(done_tool["call_id"], "t1")
         self.assertEqual(client.recv()["text"], "Linux")
         self.assertEqual(client.recv()["ev"], "done")
+
+    def _wait_lists(self, count):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            with self.mock.lock:
+                if self.mock.lists_done >= count:
+                    return
+            time.sleep(0.02)
+        self.fail("attach did not list sessions")
+
+    def _deltas_until_done(self, client):
+        parts = []
+        while True:
+            ev = client.recv()
+            if ev["ev"] == "delta":
+                parts.append(ev["text"])
+                continue
+            if ev["ev"] == "done":
+                return "".join(parts)
+            self.fail("unexpected event %r" % (ev,))
+
+    def test_long_delta_remote_user_and_partial_stay_intact(self):
+        body = "L" * (AID.MSG_LIMIT + 40)
+        huge = "m" * (AID.MSG_LIMIT + 40)
+        client = self.connect()
+        client.send({"op": "chat", "id": "r1", "text": "long"})
+        self.assertEqual(client.recv()["ev"], "start")
+        self.assertGreaterEqual(self.mock.wait_opens(1), 1)
+        self.mock.emit(_v2(
+            "session.text.delta", sessionID="ses_new",
+            assistantMessageID="m1", ordinal=0, delta=body))
+        self.mock.emit(_v2(
+            "session.execution.failed", sessionID="ses_new",
+            error={"message": huge, "status": 500}))
+        self.assertEqual(client.recv()["text"], body)
+        err = client.recv()
+        self.assertEqual(err["partial"], body)
+        self.assertEqual(err["msg"], huge[:AID.MSG_LIMIT])
+        self.assertEqual(len(err["msg"]), AID.MSG_LIMIT)
+        self.mock.emit(_v2(
+            "session.inbox.enqueued", sessionID="ses_new", inboxID="inb_long",
+            item={"type": "user", "payload": {"text": body, "metadata": {}}}))
+        remote = client.recv()
+        self.assertEqual(remote["ev"], "remote_user")
+        self.assertEqual(remote["text"], body)
+
+    def test_password_split_across_deltas_is_redacted(self):
+        client = self.connect()
+        client.send({"op": "chat", "id": "r1", "text": "leak"})
+        self.assertEqual(client.recv()["ev"], "start")
+        self.assertGreaterEqual(self.mock.wait_opens(1), 1)
+        secret = self.password
+        cut = len(secret) // 2
+        self.mock.emit(_v2(
+            "session.text.delta", sessionID="ses_new",
+            assistantMessageID="m1", ordinal=0, delta="x" + secret[:cut]))
+        self.mock.emit(_v2(
+            "session.text.delta", sessionID="ses_new",
+            assistantMessageID="m1", ordinal=0, delta=secret[cut:] + "y"))
+        self.mock.emit(_v2("session.idle", sessionID="ses_new"))
+        blob = self._deltas_until_done(client)
+        self.assertEqual(blob, "x[redacted]y")
+        self.assertNotIn(secret, blob)
+        token = base64.b64encode(b"opencode:" + secret.encode()).decode()
+        cut = len(token) // 2
+        client.send({"op": "chat", "id": "r2", "text": "token"})
+        self.assertEqual(client.recv()["ev"], "start")
+        self.mock.emit(_v2(
+            "session.text.delta", sessionID="ses_new",
+            assistantMessageID="m2", ordinal=0, delta="T" + token[:cut]))
+        self.mock.emit(_v2(
+            "session.text.delta", sessionID="ses_new",
+            assistantMessageID="m2", ordinal=0, delta=token[cut:] + "Z"))
+        self.mock.emit(_v2("session.idle", sessionID="ses_new"))
+        blob = self._deltas_until_done(client)
+        self.assertEqual(blob, "T[redacted]Z")
+        self.assertNotIn(token, blob)
+        self.assertNotIn(secret, blob)
+
+    def test_stop_returns_while_the_sse_peer_stays_open(self):
+        extra = AID.OpenCodeClient()
+        extra.start()
+        try:
+            deadline = time.monotonic() + 3
+            while not extra.connected.is_set():
+                if time.monotonic() > deadline:
+                    self.fail("sse did not connect")
+                time.sleep(0.02)
+            started = time.monotonic()
+            extra.stop()
+            elapsed = time.monotonic() - started
+        finally:
+            extra.stop()
+        self.assertLess(elapsed, 1.0)
+        self.assertFalse(self.mock.closed)
+        with self.mock.lock:
+            self.assertGreaterEqual(len(self.mock.sse_queues), 1)
+
+    def test_short_reads_do_not_drop_the_tcp_connection(self):
+        client = self.connect()
+        self.mock.fault = "info"
+        client.send({"op": "status"})
+        status = client.recv()
+        self.assertEqual(status["net"], "offline")
+        client.send({"op": "status"})
+        status = client.recv()
+        self.assertEqual(status["net"], "ok")
+        self.mock.fault = "create"
+        client.send({"op": "reset"})
+        err = client.recv()
+        self.assertEqual(err["ev"], "error")
+        self.assertEqual(err["kind"], "server")
+        client.send({"op": "status"})
+        status = client.recv()
+        self.assertEqual(status["net"], "ok")
+        self.assertTrue(status.get("session_id"))
+
+    def test_redirect_is_refused(self):
+        self.mock.redirect_status = 302
+        self.mock.redirect_hold = threading.Event()
+        self.mock.redirect_entered = threading.Event()
+        client = self.connect()
+        try:
+            client.send({"op": "chat", "id": "r1", "text": "hi"})
+            err = client.recv(timeout=2)
+        finally:
+            self.mock.redirect_hold.set()
+            self.mock.redirect_status = 0
+        self.assertEqual(err["ev"], "error")
+        self.assertEqual(err["kind"], "server")
+        self.assertIn("302", err["msg"])
+        self.assertNotIn(self.password, json.dumps(err))
+        calls = self.mock.wait_calls(lambda call: "stolen" in call["path"], timeout=0.2)
+        self.assertEqual(calls, [])
+        client.send({"op": "status"})
+        self.assertEqual(client.recv()["net"], "ok")
+
+    def test_pc_prompt_is_queued_until_the_handheld_turn_finishes(self):
+        client = self.connect()
+        client.send({"op": "chat", "id": "r1", "text": "handheld"})
+        self.assertEqual(client.recv()["ev"], "start")
+        self.assertGreaterEqual(self.mock.wait_opens(1), 1)
+        self.mock.emit(_v2(
+            "session.inbox.enqueued", sessionID="ses_new", inboxID="inb_pc",
+            item={"type": "user", "payload": {"text": "from the desk", "metadata": {}}}))
+        self.assert_quiet(0.3)
+        self.mock.emit(_v2(
+            "session.text.delta", sessionID="ses_new",
+            assistantMessageID="m1", ordinal=0, delta="Hi"))
+        self.mock.emit(_v2("session.idle", sessionID="ses_new"))
+        self.assertEqual(client.recv()["text"], "Hi")
+        self.assertEqual(client.recv(), {"ev": "done", "id": "r1"})
+        remote = client.recv()
+        self.assertEqual(remote["ev"], "remote_user")
+        self.assertEqual(remote["text"], "from the desk")
+        self.assertEqual(client.recv(), {"ev": "start", "id": remote["id"]})
+        self.mock.emit(_v2(
+            "session.text.delta", sessionID="ses_new",
+            assistantMessageID="m2", ordinal=0, delta="PC"))
+        self.mock.emit(_v2("session.idle", sessionID="ses_new"))
+        self.assertEqual(client.recv()["text"], "PC")
+        self.assertEqual(client.recv()["ev"], "done")
+
+    def test_cancel_during_lookup_sends_no_prompt(self):
+        self.mock.list_gate = threading.Event()
+        self.mock.list_ready = threading.Event()
+        client = self.connect()
+        try:
+            client.send({"op": "chat", "id": "r1", "text": "hi"})
+            self.assertTrue(self.mock.list_ready.wait(2))
+            client.send({"op": "cancel", "id": "r1"})
+            self.mock.list_gate.set()
+            err = client.recv(timeout=2)
+        finally:
+            self.mock.list_gate.set()
+        self.assertEqual(err["ev"], "error")
+        self.assertEqual(err["kind"], "cancelled")
+        self.assertEqual(err["id"], "r1")
+        self.assert_quiet(0.3)
+        prompts = self.mock.wait_calls(lambda call: call["path"].endswith("/prompt"), timeout=0.3)
+        self.assertEqual(prompts, [])
+
+    def test_cancel_then_new_chat_ignores_the_old_interrupt(self):
+        client = self.connect()
+        client.send({"op": "chat", "id": "r1", "text": "first"})
+        self.assertEqual(client.recv()["ev"], "start")
+        self.assertGreaterEqual(self.mock.wait_opens(1), 1)
+        client.send({"op": "cancel", "id": "r1"})
+        client.send({"op": "chat", "id": "r2", "text": "second"})
+        seen = []
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                ev = client.recv(timeout=0.4)
+            except (socket.timeout, TimeoutError):
+                continue
+            seen.append(ev)
+            if ev.get("ev") == "start" and ev.get("id") == "r2":
+                break
+        else:
+            self.fail("no start for r2, saw %r" % (seen,))
+        self.assertTrue(any(
+            ev.get("id") == "r1" and ev.get("kind") == "cancelled" for ev in seen))
+        self.mock.wait_calls(
+            lambda call: call["path"].endswith("/prompt")
+            and isinstance(call["body"], dict)
+            and call["body"].get("metadata", {}).get("rid") == "r2")
+        self.mock.emit(_v2(
+            "session.execution.interrupted", sessionID="ses_new", reason="user"))
+        self.mock.emit(_v2("session.idle", sessionID="ses_new"))
+        self.assert_quiet(0.3)
+        self.mock.emit(_v2(
+            "session.text.delta", sessionID="ses_new",
+            assistantMessageID="m2", ordinal=0, delta="B"))
+        self.mock.emit(_v2("session.idle", sessionID="ses_new"))
+        self.assertEqual(client.recv()["text"], "B")
+        self.assertEqual(client.recv(), {"ev": "done", "id": "r2"})
+
+    def test_reset_is_not_reverted_by_an_inflight_chat(self):
+        with self.mock.lock:
+            self.mock.sessions.clear()
+        self.mock.create_gate = threading.Event()
+        self.mock.create_entered = threading.Event()
+        client = self.connect()
+        try:
+            self.assertGreaterEqual(self.mock.wait_opens(1), 1)
+            client.send({"op": "chat", "id": "r1", "text": "late"})
+            self.assertTrue(self.mock.create_entered.wait(2))
+            client.send({"op": "reset"})
+            reset = client.recv(timeout=2)
+            self.assertEqual(reset["ev"], "status")
+            self.assertTrue(reset["reset"])
+            sid = reset["session_id"]
+            self.mock.create_gate.set()
+            err = client.recv(timeout=2)
+        finally:
+            self.mock.create_gate.set()
+        self.assertEqual(err["ev"], "error")
+        self.assertEqual(err["id"], "r1")
+        self.assertEqual(err["kind"], "interrupted")
+        client.send({"op": "status"})
+        status = client.recv()
+        self.assertEqual(status["session_id"], sid)
+        self.assertEqual(status["net"], "ok")
+        prompts = self.mock.wait_calls(lambda call: call["path"].endswith("/prompt"), timeout=0.3)
+        self.assertEqual(prompts, [])
+
+    def test_server_connected_adopts_a_late_session(self):
+        with self.mock.lock:
+            self.mock.sessions.clear()
+        client = self.connect()
+        self.assertGreaterEqual(self.mock.wait_opens(1), 1)
+        self._wait_lists(2)
+        client.send({"op": "status"})
+        before = client.recv()
+        self.assertIsNone(before.get("session_id"))
+        with self.mock.lock:
+            self.mock.sessions.insert(0, {"id": "ses_late", "directory": _WORKDIR})
+        self.mock.emit({"id": "evt", "type": "server.connected", "data": {}})
+        deadline = time.monotonic() + 3
+        seen = None
+        while time.monotonic() < deadline:
+            client.send({"op": "status"})
+            seen = client.recv()
+            if seen.get("session_id") == "ses_late" and seen.get("net") == "ok":
+                break
+        else:
+            self.fail("did not adopt on server.connected, last %r" % (seen,))
+
+    def test_inbox_adopts_a_session_when_none_is_attached(self):
+        with self.mock.lock:
+            self.mock.sessions.clear()
+        client = self.connect()
+        self.assertGreaterEqual(self.mock.wait_opens(1), 1)
+        self._wait_lists(2)
+        client.send({"op": "status"})
+        before = client.recv()
+        self.assertIsNone(before.get("session_id"))
+        with self.mock.lock:
+            self.mock.sessions.insert(0, {"id": "ses_late", "directory": _WORKDIR})
+        self.mock.emit(_v2(
+            "session.inbox.enqueued", sessionID="ses_late", inboxID="inb_late",
+            item={"type": "user", "payload": {"text": "from the desk", "metadata": {}}}))
+        remote = client.recv(timeout=3)
+        self.assertEqual(remote["ev"], "remote_user")
+        self.assertEqual(remote["text"], "from the desk")
+        self.assertEqual(client.recv()["ev"], "start")
 
 
 if __name__ == "__main__":
