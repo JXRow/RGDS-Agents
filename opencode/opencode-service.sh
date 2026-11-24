@@ -11,6 +11,8 @@ OPENCODE_PORT="${OPENCODE_PORT:-4096}"
 OPENCODE_PID_FILE="${OPENCODE_PID_FILE:-/tmp/opencode-serve.pid}"
 OPENCODE_LOG_FILE="${OPENCODE_LOG_FILE:-/tmp/opencode-serve.log}"
 OPENCODE_PASSWORD_FILE="${OPENCODE_PASSWORD_FILE:-$OPENCODE_DATA_ROOT/server.password}"
+OPENCODE_LOCK_DIR="${OPENCODE_LOCK_DIR:-/tmp/opencode-service.lock}"
+_lock_held=0
 
 export HOME="${HOME:-/root}"
 export XDG_CONFIG_HOME="$OPENCODE_DATA_ROOT/config"
@@ -105,7 +107,60 @@ with urllib.request.urlopen(req, timeout=2) as resp:
   fi
 }
 
-stop_service() {
+# BusyBox ash runs EXIT traps in subshells. Drop the trap before any $(...)
+# and only remove the directory from the process that acquired it.
+release_lifecycle_lock() {
+  trap - EXIT INT TERM
+  if [ "$_lock_held" != 1 ]; then
+    return 0
+  fi
+  owner_pid=$(exec sh -c 'echo "$PPID"' 2>/dev/null || true)
+  if [ "$owner_pid" != "$$" ]; then
+    return 0
+  fi
+  rm -rf "$OPENCODE_LOCK_DIR"
+  _lock_held=0
+}
+
+lock_owner_alive() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$1" 2>/dev/null
+}
+
+read_lock_owner() {
+  if [ -f "$OPENCODE_LOCK_DIR/pid" ]; then
+    head -n 1 "$OPENCODE_LOCK_DIR/pid" 2>/dev/null | tr -d '[:space:]' || true
+  fi
+  return 0
+}
+
+acquire_lifecycle_lock() {
+  trap 'release_lifecycle_lock' EXIT
+  trap 'release_lifecycle_lock; exit 1' INT TERM
+  while :; do
+    if mkdir -m 700 "$OPENCODE_LOCK_DIR" 2>/dev/null; then
+      _lock_held=1
+      printf '%s\n' "$$" > "$OPENCODE_LOCK_DIR/pid"
+      return 0
+    fi
+    owner="$(read_lock_owner)"
+    if lock_owner_alive "$owner"; then
+      sleep 0.2
+      continue
+    fi
+    sleep 0.2
+    owner="$(read_lock_owner)"
+    if lock_owner_alive "$owner"; then
+      sleep 0.2
+      continue
+    fi
+    rm -rf "$OPENCODE_LOCK_DIR" || true
+  done
+}
+
+_stop() {
   pid="$(running_pid || true)"
   if [ -z "$pid" ]; then
     rm -f "$OPENCODE_PID_FILE"
@@ -127,14 +182,14 @@ stop_service() {
   return 1
 }
 
-start_service() {
+_start() {
   existing="$(running_pid || true)"
   if [ -n "$existing" ] && is_healthy; then
     echo "opencode already running (pid $existing)"
     return 0
   fi
   if [ -n "$existing" ]; then
-    stop_service
+    _stop
   else
     rm -f "$OPENCODE_PID_FILE"
   fi
@@ -213,14 +268,17 @@ status_service() {
 
 case "${1:-}" in
   start)
-    start_service
+    acquire_lifecycle_lock
+    _start
     ;;
   stop)
-    stop_service
+    acquire_lifecycle_lock
+    _stop
     ;;
   restart)
-    stop_service
-    start_service
+    acquire_lifecycle_lock
+    _stop
+    _start
     ;;
   status)
     status_service

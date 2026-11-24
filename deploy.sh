@@ -49,6 +49,40 @@ rscp() {
   fi
 }
 
+file_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+    return 0
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+    return 0
+  fi
+  return 1
+}
+
+remote_opencode_digest() {
+  rssh "$1" "if [ ! -f '$2' ]; then echo MISSING; elif command -v sha256sum >/dev/null 2>&1; then sha256sum '$2' | awk '{print \$1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 '$2' | awk '{print \$1}'; else echo NOSHA; fi"
+}
+
+opencode_should_skip_upload() {
+  remote_path="$1"
+  if local_sha="$(file_sha256 opencode/bin/opencode)"; then
+    remote_sha="$(remote_opencode_digest "$TARGET" "$remote_path")"
+    remote_sha="$(printf '%s' "$remote_sha" | tr -d '[:space:]')"
+    if [ "$remote_sha" = "$local_sha" ]; then
+      return 0
+    fi
+    if [ "$remote_sha" != "NOSHA" ]; then
+      return 1
+    fi
+  fi
+  local_size=$(wc -c < opencode/bin/opencode | tr -d '[:space:]')
+  remote_size=$(rssh "$TARGET" "[ -f '$remote_path' ] && wc -c < '$remote_path' | tr -d '[:space:]' || echo 0")
+  remote_size=$(printf '%s' "$remote_size" | tr -d '[:space:]')
+  [ "$local_size" = "$remote_size" ]
+}
+
 echo ">> 目标: $TARGET"
 echo ">> 复制应用代码"
 rssh "$TARGET" "mkdir -p '$GAME/bin' '$GAME/lib' '$APPS/Imgs'"
@@ -60,16 +94,19 @@ if [ -d opencode ]; then
   rssh "$TARGET" "mkdir -p '$GAME/opencode/bin'"
   rscp opencode/opencode-service.sh opencode/opencode-setup-web.py opencode/AGENTS.md "$TARGET:$GAME/opencode/"
   rssh "$TARGET" "chmod +x '$GAME/opencode/opencode-service.sh' '$GAME/opencode/opencode-setup-web.py'"
-  if [ -x opencode/bin/opencode ]; then
-    local_size=$(wc -c < opencode/bin/opencode | tr -d '[:space:]')
-    remote_size=$(rssh "$TARGET" "[ -f '$GAME/opencode/bin/opencode' ] && wc -c < '$GAME/opencode/bin/opencode' | tr -d '[:space:]' || echo 0")
-    if [ "$local_size" != "$remote_size" ]; then
+  if [ -f opencode/bin/opencode ]; then
+    if opencode_should_skip_upload "$GAME/opencode/bin/opencode"; then
+      echo ">> opencode 二进制已在掌机上，跳过"
+    else
       echo ">> 复制 opencode 二进制"
       rscp opencode/bin/opencode "$TARGET:$GAME/opencode/bin/opencode.new"
       rssh "$TARGET" "chmod +x '$GAME/opencode/bin/opencode.new' && mv -f '$GAME/opencode/bin/opencode.new' '$GAME/opencode/bin/opencode'"
-    else
-      echo ">> opencode 二进制已在掌机上，跳过"
     fi
+  elif rssh "$TARGET" "[ -f '$GAME/opencode/bin/opencode' ]"; then
+    echo ">> 本地无 opencode 二进制，掌机上已有，跳过"
+  else
+    echo "!! 缺少 opencode/bin/opencode（本地和掌机都没有）。先运行 ./setup-opencode.sh，再重新部署。" >&2
+    exit 1
   fi
   if rssh "$TARGET" "[ -d /etc/init.d ] && [ -w /etc/init.d ]"; then
     echo ">> 安装开机自启脚本 /etc/init.d/S55opencode"

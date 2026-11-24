@@ -27,6 +27,7 @@ from typing import Any
 
 TOKEN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+SETUP_TOKEN_RE = re.compile(r"^[A-Za-z0-9]{6}$")
 MAX_BODY_BYTES = 65536
 
 
@@ -135,8 +136,12 @@ def parse_and_validate_form(form: dict[str, str], expected_token: str) -> SetupI
         raise ValidationError("API key is required.")
 
     base_url = str(form.get("base_url", "")).strip()
-    if provider_id == "custom" and not base_url:
-        raise ValidationError("Base URL is required for custom providers.")
+    preset = PROVIDER_BY_ID.get(provider_id)
+    if preset and preset.needs_base_url and not base_url:
+        if preset.default_base_url:
+            base_url = preset.default_base_url
+        else:
+            raise ValidationError("Base URL is required for this provider.")
     if base_url:
         parsed = urllib.parse.urlparse(base_url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
@@ -204,9 +209,8 @@ def basic_auth_header(password: str) -> str:
     return "Basic " + base64.b64encode(raw).decode("ascii")
 
 
-def atomic_write_json(path: Path, payload: dict[str, Any], mode: int = 0o600) -> None:
+def atomic_write_bytes(path: Path, raw: bytes, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    raw = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     tmp_path = path.parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
@@ -228,6 +232,11 @@ def atomic_write_json(path: Path, payload: dict[str, Any], mode: int = 0o600) ->
         raise
 
 
+def atomic_write_json(path: Path, payload: dict[str, Any], mode: int = 0o600) -> None:
+    raw = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    atomic_write_bytes(path, raw, mode)
+
+
 def redact_secret(text: str, secret: str) -> str:
     if not secret:
         return text
@@ -236,9 +245,9 @@ def redact_secret(text: str, secret: str) -> str:
 
 def redact_secrets(text: str, *secret_values: str) -> str:
     out = text
-    for secret in secret_values:
-        if secret:
-            out = out.replace(secret, "[REDACTED]")
+    # Longer values first so a Basic token is removed before the password it encodes.
+    for secret in sorted((s for s in secret_values if s), key=len, reverse=True):
+        out = out.replace(secret, "[REDACTED]")
     return out
 
 
@@ -484,9 +493,13 @@ class SetupHTTPServer(HTTPServer):
 
 class SetupRequestHandler(BaseHTTPRequestHandler):
     server: SetupHTTPServer
+    timeout = 15
 
     def log_message(self, format: str, *args: Any) -> None:
-        sys.stderr.write(f"[opencode-setup-web] {self.command} {self.path}\n")
+        cmd = getattr(self, "command", None) or "-"
+        raw_path = getattr(self, "path", None) or ""
+        path = urllib.parse.urlparse(raw_path).path or "-"
+        sys.stderr.write(f"[opencode-setup-web] {cmd} {path}\n")
 
     def _wants_json(self) -> bool:
         content_type = self.headers.get("Content-Type", "")
@@ -572,13 +585,24 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
 
         try:
             self._apply_setup(inp, cfg)
-        except RuntimeError as exc:
+        except (RuntimeError, OSError) as exc:
             server_pw = ""
             try:
                 server_pw = read_server_password(cfg.password_file)
-            except RuntimeError:
+            except (RuntimeError, OSError):
                 pass
-            safe_msg = redact_secrets(str(exc), inp.api_key, server_pw)
+            basic_token = ""
+            if server_pw:
+                basic_token = base64.b64encode(f"opencode:{server_pw}".encode()).decode()
+            submitted_token = str(form.get("token", "")).strip()
+            safe_msg = redact_secrets(
+                str(exc),
+                inp.api_key,
+                server_pw,
+                basic_token,
+                cfg.token,
+                submitted_token,
+            )
             self._send_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, safe_msg, as_json)
             return
 
@@ -601,6 +625,9 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
         config_path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(config_path.parent, 0o700)
 
+        prior_existed = config_path.is_file()
+        prior_bytes = config_path.read_bytes() if prior_existed else None
+
         existing_cfg = load_existing_json(config_path)
         new_cfg = build_opencode_config(inp, existing_cfg)
         atomic_write_json(config_path, new_cfg, mode=0o600)
@@ -611,62 +638,87 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
         service_env = os.environ.copy()
         service_env["OPENCODE_DATA_ROOT"] = str(cfg.data_root)
         service_env["OPENCODE_PASSWORD_FILE"] = str(cfg.password_file)
+
+        def rollback_config() -> None:
+            try:
+                if prior_existed:
+                    atomic_write_bytes(config_path, prior_bytes or b"", mode=0o600)
+                elif config_path.exists():
+                    config_path.unlink()
+            except OSError:
+                pass
+            try:
+                subprocess.run(
+                    [str(cfg.service_cmd), "restart"],
+                    env=service_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+
         try:
-            result = subprocess.run(
-                [str(cfg.service_cmd), "restart"],
-                env=service_env,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
+            try:
+                result = subprocess.run(
+                    [str(cfg.service_cmd), "restart"],
+                    env=service_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise RuntimeError(f"Failed to restart opencode service: {exc}") from exc
+
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(
+                    f"opencode service restart failed (exit {result.returncode}): {detail}"
+                )
+
+            server_password = read_server_password(cfg.password_file)
+            auth_header = basic_auth_header(server_password)
+            base_url = cfg.server_url.rstrip("/")
+
+            info_req = urllib.request.Request(
+                f"{base_url}/api/info",
+                headers={"Authorization": auth_header},
+                method="GET",
             )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise RuntimeError(f"Failed to restart opencode service: {exc}") from exc
+            try:
+                with urllib.request.urlopen(info_req, timeout=5) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"Server info check returned HTTP {resp.status}.")
+            except (OSError, urllib.error.URLError) as exc:
+                raise RuntimeError(f"OpenCode server check failed: {exc}") from exc
 
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
-            raise RuntimeError(
-                f"opencode service restart failed (exit {result.returncode}): {detail}"
+            cred_body = json.dumps(build_credential_payload(inp)).encode("utf-8")
+            cred_req = urllib.request.Request(
+                f"{base_url}/api/credential",
+                data=cred_body,
+                headers={
+                    "Authorization": auth_header,
+                    "Content-Type": "application/json",
+                },
+                method="POST",
             )
-
-        server_password = read_server_password(cfg.password_file)
-        auth_header = basic_auth_header(server_password)
-        base_url = cfg.server_url.rstrip("/")
-
-        info_req = urllib.request.Request(
-            f"{base_url}/api/info",
-            headers={"Authorization": auth_header},
-            method="GET",
-        )
-        try:
-            with urllib.request.urlopen(info_req, timeout=5) as resp:
-                if resp.status != 200:
-                    raise RuntimeError(f"Server info check returned HTTP {resp.status}.")
-        except (OSError, urllib.error.URLError) as exc:
-            raise RuntimeError(f"OpenCode server check failed: {exc}") from exc
-
-        cred_body = json.dumps(build_credential_payload(inp)).encode("utf-8")
-        cred_req = urllib.request.Request(
-            f"{base_url}/api/credential",
-            data=cred_body,
-            headers={
-                "Authorization": auth_header,
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(cred_req, timeout=5) as resp:
-                if resp.status not in (200, 201):
-                    raise RuntimeError(f"Credential API returned HTTP {resp.status}.")
-        except urllib.error.HTTPError as exc:
-            with exc:
-                detail = exc.read().decode("utf-8", errors="replace").strip()
-            raise RuntimeError(
-                f"OpenCode credential store failed (HTTP {exc.code}): {detail}"
-            ) from exc
-        except (OSError, urllib.error.URLError) as exc:
-            raise RuntimeError(f"OpenCode credential store failed: {exc}") from exc
+            try:
+                with urllib.request.urlopen(cred_req, timeout=5) as resp:
+                    if resp.status not in (200, 201):
+                        raise RuntimeError(f"Credential API returned HTTP {resp.status}.")
+            except urllib.error.HTTPError as exc:
+                with exc:
+                    detail = exc.read().decode("utf-8", errors="replace").strip()
+                raise RuntimeError(
+                    f"OpenCode credential store failed (HTTP {exc.code}): {detail}"
+                ) from exc
+            except (OSError, urllib.error.URLError) as exc:
+                raise RuntimeError(f"OpenCode credential store failed: {exc}") from exc
+        except Exception:
+            rollback_config()
+            raise
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -685,6 +737,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def run_server(args: argparse.Namespace) -> int:
+    if args.token is not None and SETUP_TOKEN_RE.fullmatch(args.token.strip()) is None:
+        print(
+            "error: --token must be a 6-character pairing code matching ^[A-Za-z0-9]{6}$.",
+            file=sys.stderr,
+        )
+        return 2
     token = args.token.strip().upper() if args.token else generate_token()
     data_root = Path(args.data_root)
     password_file = Path(args.password_file) if args.password_file else (data_root / "server.password")

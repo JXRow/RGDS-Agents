@@ -20,13 +20,15 @@ if [ -z "$LOCAL_PORT" ]; then
   LOCAL_PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 fi
 
-CTRL_SOCK="$(mktemp -u /tmp/rgds-opencode-ssh.XXXXXX)"
+CTRL_DIR="$(mktemp -d /tmp/rgds-opencode-ssh.XXXXXX)"
+chmod 700 "$CTRL_DIR"
+CTRL_SOCK="$CTRL_DIR/ctrl"
 
 cleanup() {
   if [ -S "$CTRL_SOCK" ]; then
     ssh -S "$CTRL_SOCK" -O exit "$TARGET" >/dev/null 2>&1 || true
   fi
-  rm -f "$CTRL_SOCK"
+  rm -rf "$CTRL_DIR"
 }
 trap cleanup EXIT INT TERM
 

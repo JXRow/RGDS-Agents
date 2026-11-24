@@ -1,6 +1,8 @@
 import base64
+import contextlib
 import http.server
 import importlib.util
+import io
 import json
 import os
 import socket
@@ -230,6 +232,85 @@ class PureFunctionsTest(unittest.TestCase):
             "failed with [REDACTED] and [REDACTED]",
         )
         self.assertEqual(setup_mod.redact_secret("unchanged", ""), "unchanged")
+
+    def test_empty_base_url_uses_preset_default(self) -> None:
+        for provider_id in ("deepseek", "minimax", "openrouter"):
+            preset = setup_mod.PROVIDER_BY_ID[provider_id]
+            with self.subTest(provider_id=provider_id):
+                inp = setup_mod.parse_and_validate_form(
+                    {
+                        "token": "AB3K9M",
+                        "provider_id": provider_id,
+                        "model_id": "model-a",
+                        "api_key": "sk-test",
+                        "base_url": "",
+                    },
+                    expected_token="AB3K9M",
+                )
+                self.assertEqual(inp.base_url, preset.default_base_url)
+                self.assertTrue(inp.base_url.startswith("https://"))
+
+        with self.assertRaises(setup_mod.ValidationError) as ctx:
+            setup_mod.parse_and_validate_form(
+                {
+                    "token": "AB3K9M",
+                    "provider_id": "custom",
+                    "model_id": "model-a",
+                    "api_key": "sk-test",
+                    "base_url": "",
+                },
+                expected_token="AB3K9M",
+            )
+        self.assertIn("Base URL is required for this provider.", str(ctx.exception))
+
+    def test_log_message_guards_missing_path_and_drops_query(self) -> None:
+        handler = setup_mod.SetupRequestHandler.__new__(setup_mod.SetupRequestHandler)
+        missing = io.StringIO()
+        with contextlib.redirect_stderr(missing):
+            handler.log_message("%s", "unused")
+        self.assertEqual(missing.getvalue(), "[opencode-setup-web] - -\n")
+
+        handler.command = "GET"
+        handler.path = "/setup?token=SECRET&api_key=sk-1"
+        logged = io.StringIO()
+        with contextlib.redirect_stderr(logged):
+            handler.log_message("GET %s", handler.path)
+        text = logged.getvalue()
+        self.assertEqual(text, "[opencode-setup-web] GET /setup\n")
+        self.assertNotIn("SECRET", text)
+        self.assertNotIn("api_key", text)
+        self.assertNotIn("?", text)
+
+    def test_invalid_cli_token_exits_before_listener(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            status = Path(td) / "status.json"
+            for bad in ("nope!", "abc", "ABCDEFG", "AB3-KM", "bad token"):
+                with self.subTest(bad=bad):
+                    proc = subprocess.run(
+                        [
+                            sys.executable,
+                            str(SETUP_SCRIPT),
+                            "--token",
+                            bad,
+                            "--host",
+                            "127.0.0.1",
+                            "--port",
+                            "0",
+                            "--data-root",
+                            td,
+                            "--status-file",
+                            str(status),
+                            "--skip-service",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False,
+                    )
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertIn("^[A-Za-z0-9]{6}$", proc.stderr)
+                    self.assertFalse(status.exists())
+                    self.assertEqual(proc.stdout, "")
 
 
 class _MockOpenCodeV2Server(http.server.HTTPServer):
@@ -529,6 +610,191 @@ class LiveWizardHTTPTest(unittest.TestCase):
         thread.join(timeout=5.0)
         self.assertFalse(thread.is_alive())
 
+    def test_error_response_redacts_basic_token_and_pairing_code(self) -> None:
+        basic = base64.b64encode(f"opencode:{self.server_password}".encode()).decode()
+        token = "RED7OK"
+        api_key = "sk-redact-basic-token"
+        fail_script = self.root / "redact-fail.sh"
+        fail_script.write_text(
+            "#!/bin/sh\n"
+            f"echo 'fail {basic} token={token} pw={self.server_password} key={api_key}' >&2\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        os.chmod(fail_script, 0o755)
+
+        thread, info = self._start_wizard(token=token, service_cmd=fail_script)
+        base_url = info["url"].rstrip("/")
+        payload = json.dumps(
+            {
+                "token": token.lower(),
+                "provider_id": "openai",
+                "model_id": "gpt-5.4",
+                "api_key": api_key,
+            }
+        ).encode("utf-8")
+        status, body = http_request(
+            f"{base_url}/setup",
+            method="POST",
+            data=payload,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        self.assertEqual(status, 500)
+        parsed = json.loads(body)
+        self.assertFalse(parsed["ok"])
+        self.assertNotIn(basic, body)
+        self.assertNotIn(token, body)
+        self.assertNotIn(token.lower(), body)
+        self.assertNotIn(self.server_password, body)
+        self.assertNotIn(api_key, body)
+        self.assertIn("[REDACTED]", parsed["error"])
+
+        fail_script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        status, body = http_request(
+            f"{base_url}/setup",
+            method="POST",
+            data=payload,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        thread.join(timeout=5.0)
+        self.assertFalse(thread.is_alive())
+
+    def test_filesystem_error_returns_http_500(self) -> None:
+        calls = {"n": 0}
+        original = setup_mod.SetupRequestHandler._apply_setup
+
+        def flaky(inp: object, cfg: object) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError(28, "No space left on device")
+            return original(inp, cfg)
+
+        setup_mod.SetupRequestHandler._apply_setup = staticmethod(flaky)
+        thread = None
+        info = None
+        try:
+            thread, info = self._start_wizard(token="OSERR1")
+            base_url = info["url"].rstrip("/")
+            payload = json.dumps(
+                {
+                    "token": "OSERR1",
+                    "provider_id": "openai",
+                    "model_id": "gpt-5.4",
+                    "api_key": "sk-oserr",
+                }
+            ).encode("utf-8")
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            status, body = http_request(
+                f"{base_url}/setup",
+                method="POST",
+                data=payload,
+                headers=headers,
+            )
+            self.assertEqual(status, 500)
+            parsed = json.loads(body)
+            self.assertFalse(parsed["ok"])
+            self.assertIn("No space left on device", parsed["error"])
+            self.assertNotIn("sk-oserr", body)
+        finally:
+            setup_mod.SetupRequestHandler._apply_setup = staticmethod(original)
+            if info is not None and thread is not None and thread.is_alive():
+                http_request(
+                    f"{info['url'].rstrip('/')}/setup",
+                    method="POST",
+                    data=json.dumps(
+                        {
+                            "token": "OSERR1",
+                            "provider_id": "openai",
+                            "model_id": "gpt-5.4",
+                            "api_key": "sk-oserr",
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                )
+                thread.join(timeout=5.0)
+        self.assertIsNotNone(thread)
+        self.assertFalse(thread.is_alive())
+
+    def _setup_input(self, api_key: str = "sk-rollback") -> object:
+        return setup_mod.SetupInput(
+            token="PAIR42",
+            provider_id="openai",
+            model_id="gpt-5.4",
+            api_key=api_key,
+            base_url="",
+        )
+
+    def _server_config(self, service_cmd: Path) -> object:
+        return setup_mod.ServerConfig(
+            token="PAIR42",
+            data_root=self.data_root,
+            service_cmd=service_cmd,
+            server_url=f"http://127.0.0.1:{self.api_port}",
+            password_file=self.password_file,
+            skip_service=False,
+        )
+
+    def test_failed_restart_restores_or_removes_config(self) -> None:
+        config_path = self.data_root / "config" / "opencode" / "opencode.json"
+        prior = b'{"timezone":"UTC","untouched":true}\n'
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_bytes(prior)
+        os.chmod(config_path, 0o600)
+
+        call_log = self.root / "rollback-restarts.log"
+        fail_script = self.root / "rollback-fail.sh"
+        fail_script.write_text(
+            f"#!/bin/sh\necho \"$@\" >> '{call_log}'\nexit 1\n",
+            encoding="utf-8",
+        )
+        os.chmod(fail_script, 0o755)
+
+        with self.assertRaises(RuntimeError):
+            setup_mod.SetupRequestHandler._apply_setup(
+                self._setup_input(),
+                self._server_config(fail_script),
+            )
+        self.assertEqual(config_path.read_bytes(), prior)
+        self.assertNotIn(b"gpt-5.4", config_path.read_bytes())
+        self.assertEqual(call_log.read_text(encoding="utf-8").splitlines(), ["restart", "restart"])
+
+        config_path.unlink()
+        call_log.write_text("", encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            setup_mod.SetupRequestHandler._apply_setup(
+                self._setup_input(),
+                self._server_config(fail_script),
+            )
+        self.assertFalse(config_path.exists())
+        self.assertEqual(call_log.read_text(encoding="utf-8").splitlines(), ["restart", "restart"])
+
+    def test_credential_failure_restores_prior_config(self) -> None:
+        config_path = self.data_root / "config" / "opencode" / "opencode.json"
+        prior = b'{"timezone":"UTC","keep":1}\n'
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_bytes(prior)
+
+        call_log = self.root / "cred-restarts.log"
+        ok_script = self.root / "rollback-ok.sh"
+        ok_script.write_text(
+            f"#!/bin/sh\necho \"$@\" >> '{call_log}'\nexit 0\n",
+            encoding="utf-8",
+        )
+        os.chmod(ok_script, 0o755)
+        self.api_server.fail_credential_status = 400
+        try:
+            with self.assertRaises(RuntimeError):
+                setup_mod.SetupRequestHandler._apply_setup(
+                    self._setup_input("sk-cred-fail"),
+                    self._server_config(ok_script),
+                )
+        finally:
+            self.api_server.fail_credential_status = None
+        self.assertEqual(config_path.read_bytes(), prior)
+        self.assertEqual(call_log.read_text(encoding="utf-8").splitlines(), ["restart", "restart"])
+        self.assertEqual(self.api_server.credentials, [])
+
 
 class ServiceScriptTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -600,6 +866,7 @@ except SystemExit:
                 "OPENCODE_PORT": str(self.port),
                 "OPENCODE_PID_FILE": str(self.pid_file),
                 "OPENCODE_LOG_FILE": str(self.log_file),
+                "OPENCODE_LOCK_DIR": str(self.root / "opencode-service.lock"),
             }
         )
 
@@ -631,6 +898,7 @@ except SystemExit:
         start1 = self._run_service("start")
         self.assertEqual(start1.returncode, 0, msg=start1.stderr)
         self.assertTrue(self.pid_file.is_file())
+        self.assertFalse(Path(self.env["OPENCODE_LOCK_DIR"]).exists())
         pid1 = self.pid_file.read_text(encoding="utf-8").strip()
         self.assertTrue(pid1.isdigit())
 
@@ -709,6 +977,25 @@ except SystemExit:
         self.assertNotEqual(res.returncode, 0)
         self.assertFalse(self.pid_file.exists())
         self.assertLess(elapsed, 5.0)
+
+    def test_lifecycle_lock_recovers_dead_owner(self) -> None:
+        dead = subprocess.Popen(["true"])
+        dead.wait(timeout=5)
+        dead_pid = dead.pid
+        try:
+            os.kill(dead_pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            self.skipTest(f"pid {dead_pid} was reused")
+
+        lock = Path(self.env["OPENCODE_LOCK_DIR"])
+        lock.mkdir(mode=0o700)
+        (lock / "pid").write_text(f"{dead_pid}\n", encoding="utf-8")
+        start = self._run_service("start")
+        self.assertEqual(start.returncode, 0, msg=start.stderr + start.stdout)
+        self.assertFalse(lock.exists())
+        self.assertTrue(self.pid_file.is_file())
 
 
 if __name__ == "__main__":
