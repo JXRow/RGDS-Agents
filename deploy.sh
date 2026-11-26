@@ -19,6 +19,9 @@
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/stt/             ← sv-helper、两个 sherpa .so、model.int8.onnx、tokens.txt
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/fonts/          ← 思源黑体，信息面板和主屏字幕用
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/run-via-menu.sh  ← SSH 按菜单流程启动
+#   /mnt/mmc/Roms/APPS/RGDS-Agents/engines/love/start.sh
+#   /mnt/mmc/Roms/APPS/RGDS-Agents/engines/openbor/start.sh
+#   /mnt/mmc/Roms/APPS/RGDS-Agents/engines/stop.sh   ← 启动和停止用户的游戏
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/bin/love         ← LÖVE 11.5 aarch64
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/lib/*.so         ← 系统缺失的 3 个 so
 #   /mnt/mmc/Roms/APPS/Imgs/RGDS-Agents.png         ← 菜单图标
@@ -88,6 +91,13 @@ echo ">> 复制应用代码"
 rssh "$TARGET" "mkdir -p '$GAME/bin' '$GAME/lib' '$APPS/Imgs'"
 rscp main.lua conf.lua subscreen.lua evdev.lua touchpoll.lua touchthread.lua micwave.lua micthread.lua stt.lua sttthread.lua aid.lua aidthread.lua rgds-aid.py alsoft.conf run-via-menu.sh "$TARGET:$GAME/"
 rssh "$TARGET" "chmod +x '$GAME/run-via-menu.sh'"
+
+echo ">> 复制游戏引擎启动脚本"
+rssh "$TARGET" "mkdir -p '$GAME/engines/love' '$GAME/engines/openbor'"
+rscp engines/common.sh engines/stop.sh "$TARGET:$GAME/engines/"
+rscp engines/love/start.sh "$TARGET:$GAME/engines/love/"
+rscp engines/openbor/start.sh "$TARGET:$GAME/engines/openbor/"
+rssh "$TARGET" "chmod +x '$GAME/engines/stop.sh' '$GAME/engines/love/start.sh' '$GAME/engines/openbor/start.sh'"
 
 if [ -d opencode ]; then
   echo ">> 复制 OpenCode 服务与配置脚本"

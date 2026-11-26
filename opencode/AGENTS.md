@@ -21,6 +21,17 @@ You run inside `opencode serve` on an Anbernic RG DS handheld.
 - Never send `SIGKILL` to `muos2.bin`. That skips `/tmp/.next`.
 - To relaunch while `love` is running, send `SIGTERM` to `love`, wait until `muos2.bin` returns, and then run `run-via-menu.sh`.
 
+## Starting a user's game
+
+- One game runs at a time. The finder and the shell tool run the same scripts. There is no request file, and a user's game does not go through `/tmp/.next`.
+- LÖVE: `/mnt/mmc/Roms/APPS/RGDS-Agents/engines/love/start.sh <game path>`
+- OpenBOR: `/mnt/mmc/Roms/APPS/RGDS-Agents/engines/openbor/start.sh <game path>`
+- Stop: `/mnt/mmc/Roms/APPS/RGDS-Agents/engines/stop.sh`
+- The game path has to exist inside the work directory. That directory is the first line of `/userdata/opencode/workdir`, or `/mnt/mmc/Roms/APPS/RGDS-Agents` when the line is missing or blank.
+- A second start stops the game that is running and starts again. Edit the game's files, then run the same start script to reload it.
+- `/tmp/rgds-game.pid` is three lines: the pid, the engine id (`love` or `openbor`), and the absolute game path. The log is `/tmp/rgds-game.log`.
+- Never print `OPENCODE_PASSWORD` or `/userdata/opencode/server.password`.
+
 ## Touch
 
 - Follow `TOUCH.md` for all touch work.
