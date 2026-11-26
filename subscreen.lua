@@ -1,9 +1,9 @@
--- 第二块屏上的信息面板窗口
+-- 主窗口以外的那块屏。两块屏时主窗口在 SDL display 1（下屏），这里开在另一块上（上屏，SDL display 0）。
 -- RGDS 的 Weston 有两个 640x480 输出（DSI-1 / DSI-2），SDL 把它们报成 display 0 / 1。
 -- LÖVE 11 每个进程只管一个窗口，这里用 LuaJIT FFI 直接调 bin/love 已链接的 libSDL2，
 -- 在主窗口以外的那块屏上开一个无边框全屏 GL 窗口，并共用 LÖVE 的 GL context：
--- 面板先画进 Canvas，切到副窗口贴图 + swap，再切回主窗口交给 LÖVE 正常 present。
--- 任何一步失败都返回错误，调用方退回到把面板画在主屏上。
+-- 画面先画进 Canvas，切到副窗口贴图 + swap，再切回主窗口交给 LÖVE 正常 present。
+-- 任何一步失败都返回错误，调用方只留主窗口。
 
 local ffi = require("ffi")
 local bit = require("bit")
@@ -72,7 +72,7 @@ function M.open(width, height)
     end
 
     local pos = bit.bor(SDL_WINDOWPOS_UNDEFINED_DISPLAY, M.display)
-    hud = SDL.SDL_CreateWindow("RGDS-Agents info", pos, pos, width, height,
+    hud = SDL.SDL_CreateWindow("RGDS-Agents", pos, pos, width, height,
         bit.bor(SDL_WINDOW_OPENGL, SDL_WINDOW_FULLSCREEN, SDL_WINDOW_BORDERLESS))
     if hud == nil then return false, sdlError("CreateWindow") end
 
