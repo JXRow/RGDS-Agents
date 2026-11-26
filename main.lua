@@ -1,10 +1,11 @@
--- RGDS-Agents (Anbernic RG DS)。主窗口是 agent UI。
--- 两块屏时主窗口在 SDL display 1（下屏，LÖVE 编号 2），第二个窗口在 SDL display 0（上屏，留给 finder）。
--- 一块屏或 --one-screen 时只有主窗口。见 screens.lua、subscreen.lua。
+-- RGDS-Agents (Anbernic RG DS)。主窗口是 agent UI，在下屏。
+-- 两块屏时第二个窗口在上屏，画 finder。游戏 pid 活着就关掉它，pid 没了再打开，选中项还在。
+-- A 在游戏行上跑该引擎的 start.sh。下屏 STOP GAME 只在游戏运行时出现，跑 engines/stop.sh。
+-- 一块屏或 --one-screen 时只有主窗口，没有 finder。见 screens.lua、subscreen.lua。
 -- 花园演示已退役：不画草地、标题卡、分数和状态块，也不再用按键走路或开始一局。
 -- 麦克风波形与电平（micwave.lua / micthread.lua，经 dsnoop 共享录音）；
 -- 按住 R1（键盘 t）录一段语音。松开后交给常驻的 sv-helper（stt.lua）做离线识别，
--- 识别出文字后再交给 rgds-aid。回复留在主窗口，长回复换行，十字键上下滚动。
+-- 识别出文字后再交给 rgds-aid。回复留在主窗口，长回复换行。finder 开着时十字键移动列表。
 -- gt9xx-0 的触摸在主窗口（下屏）上。手指按下时画十字，并在日志里写一行。手柄保留。
 
 local W, H = 640, 480
@@ -31,7 +32,11 @@ local micwave = require("micwave")
 local stt = require("stt")
 local aid = require("aid")
 local aidSeen = 0
-local PTT_BUTTON = 6                     -- R1：A/B/START/SELECT 已占用，食指按住不影响移动和 A
+local gamepid = require("gamepid")
+local finder = require("finder")
+local engines = require("engines")
+local targets = require("targets")
+local PTT_BUTTON = gamepid.VOICE_BUTTON  -- R1：A/B/START/SELECT 已占用，食指按住不影响移动和 A
 local ptt = {held = false, bgmPaused = false}
 local touchGoal = nil
 local finger = nil
@@ -473,6 +478,158 @@ local function placeMainWindow(oneScreen)
     return screens.plan(1), "could not move the main window"
 end
 
+local panel = gamepid.blank()
+local finderState
+local heldClosed = false
+local startBusy = false
+local stopAsked = false
+local touchGesture
+local gamePoll = 0
+local finderArm
+local START_DIR = "/tmp/rgds-panel-start"
+local STOP_DIR = "/tmp/rgds-panel-stop"
+
+local function padPhase()
+    if panel.phase == "running" then return "running" end
+    if not subscreen.isOpen() then return "away" end
+    if panel.phase == "failed" then return "failed" end
+    return "finder"
+end
+
+local function openTop()
+    if subscreen.isOpen() then return true end
+    if not screenPlan or not screenPlan.openSecondWindow then return false end
+    if not love.window.isVisible() then
+        hud.error = "main window hidden"
+        return false
+    end
+    local ok, err = subscreen.open(W, H)
+    if ok and (subscreen.mainDisplay ~= screenPlan.agentsSdl or subscreen.display ~= screenPlan.secondSdl) then
+        subscreen.close()
+        ok = false
+        err = string.format("displays main %s second %s, wanted %d and %d",
+            tostring(subscreen.mainDisplay), tostring(subscreen.display),
+            screenPlan.agentsSdl, screenPlan.secondSdl)
+    end
+    hud.external = ok and true or false
+    hud.error = err
+    return ok
+end
+
+local function applyWindow(effect)
+    if panel.phase == "running" then
+        if subscreen.isOpen() then
+            subscreen.close()
+            heldClosed = true
+            hud.external = false
+            print("subscreen: closed, a game is running")
+            io.stdout:flush()
+        end
+        return
+    end
+    if not heldClosed and effect ~= "open" then return end
+    if not screenPlan or not screenPlan.openSecondWindow then
+        heldClosed = false
+        return
+    end
+    if subscreen.isOpen() then
+        heldClosed = false
+        return
+    end
+    if openTop() and finderState then
+        finder.refresh(finderState)
+        heldClosed = false
+        print(string.format("subscreen: finder on display %d", subscreen.display))
+        io.stdout:flush()
+    end
+end
+
+local function pollGameNow()
+    local result = gamepid.finish(START_DIR, nil)
+    if result then
+        startBusy = false
+        if result.ok or stopAsked then
+            panel = gamepid.clearNotice(panel)
+        else
+            panel = gamepid.fail(panel, result.notice)
+        end
+    end
+    gamepid.finish(STOP_DIR, nil)
+    local prev = panel.phase
+    local effect
+    panel, effect = gamepid.observe(panel, gamepid.read(nil))
+    if prev == "running" and panel.phase ~= "running" then
+        if stopAsked then panel = gamepid.clearNotice(panel) end
+        stopAsked = false
+    end
+    applyWindow(effect)
+end
+
+local function pollGame(dt)
+    gamePoll = gamePoll + dt
+    if gamePoll < gamepid.POLL then return end
+    gamePoll = 0
+    pollGameNow()
+end
+
+local function stopGame()
+    if panel.phase ~= "running" then return end
+    stopAsked = true
+    gamepid.begin(engines.stop, nil, STOP_DIR)
+end
+
+local function startSelected()
+    if not finderState or startBusy or panel.phase == "running" then return end
+    local act = finder.confirm(finderState)
+    if type(act) ~= "table" or act.op ~= "start" then return end
+    local script = type(act.engine) == "table" and act.engine.start or nil
+    if type(script) ~= "string" or script == "" or type(act.path) ~= "string" then
+        panel = gamepid.fail(panel, gamepid.FAIL_LINE)
+        return
+    end
+    panel = gamepid.clearNotice(panel)
+    if gamepid.begin(script, act.path, START_DIR) then
+        startBusy = true
+    else
+        panel = gamepid.fail(panel, "could not run the start script")
+    end
+end
+
+local function runFinder(cmd)
+    if not finderState or panel.phase == "running" then return end
+    if cmd == "up" then finder.up(finderState)
+    elseif cmd == "down" then finder.down(finderState)
+    elseif cmd == "back" then finder.back(finderState)
+    elseif cmd == "right" then finder.right(finderState)
+    elseif cmd == "confirm" then startSelected()
+    end
+end
+
+local function pollFinderPad()
+    local phase = padPhase()
+    if phase ~= "finder" and phase ~= "failed" then
+        finderArm = nil
+        return
+    end
+    if shutdownDialog then
+        finderArm = nil
+        return
+    end
+    local hat = ""
+    local joystick = love.joystick.getJoysticks()[1]
+    if joystick then hat = joystick:getHat(1) or "" end
+    local dir = gamepid.repeatDir(phase, hat, isDown({"up"}), isDown({"down"}))
+    if not dir then
+        finderArm = nil
+        return
+    end
+    local now = love.timer.getTime()
+    if not finderArm or now >= finderArm then
+        runFinder(dir)
+        finderArm = now + (finderArm and 0.09 or 0.32)
+    end
+end
+
 function love.load()
     local oneScreen = false
     for _, value in ipairs(arg or {}) do
@@ -507,23 +664,18 @@ function love.load()
 
     if not screenPlan.openSecondWindow then
         hud.error = placeErr or (oneScreen and "disabled by --one-screen" or "single display")
-    elseif not love.window.isVisible() then
-        hud.error = "main window hidden"
     else
-        local ok, err = subscreen.open(W, H)
-        if ok and (subscreen.mainDisplay ~= screenPlan.agentsSdl or subscreen.display ~= screenPlan.secondSdl) then
-            subscreen.close()
-            ok = false
-            err = string.format("displays main %s second %s, wanted %d and %d",
-                tostring(subscreen.mainDisplay), tostring(subscreen.display),
-                screenPlan.agentsSdl, screenPlan.secondSdl)
-        end
-        hud.external, hud.error = ok, err
+        openTop()
     end
-    if hud.external then
-        print(string.format("subscreen: second window on display %d (main window on display %d)",
+    finderState = finder.open({
+        appDir = love.filesystem.getSource(),
+        engineOf = gamepid.engineOf,
+    })
+    pollGameNow()
+    if subscreen.isOpen() then
+        print(string.format("subscreen: finder on display %d (main window on display %d)",
             subscreen.display, subscreen.mainDisplay))
-    else
+    elseif panel.phase ~= "running" then
         print("subscreen: off (" .. tostring(hud.error) .. "), one window")
     end
     io.stdout:flush()
@@ -691,6 +843,9 @@ local function duplicateTap(x, y)
 end
 
 function noteFinger(phase, x, y)
+    local cmd
+    cmd, touchGesture = gamepid.finger(padPhase(), touchGesture, phase, x, y)
+    if cmd == "stop" then stopGame() end
     if phase == false then
         if finger then finger.down = false end
         return
@@ -768,6 +923,7 @@ end
 function love.update(dt)
     evdev.pump()
     touchpoll.pump()
+    pollGame(dt)
     pollNet(dt)
     micwave.update(dt)
     stt.update()
@@ -791,18 +947,26 @@ function love.update(dt)
         return
     end
     time = time + dt
-    pollChatScroll()
+    local phase = padPhase()
+    if phase == "finder" or phase == "failed" then
+        pollFinderPad()
+    elseif phase ~= "running" then
+        pollChatScroll()
+    end
 end
 
 function love.keypressed(key, scancode)
     recordInput("keypressed", scancode or key, key)
     if key == "escape" then love.event.quit() end
+    local cmd = gamepid.press(padPhase(), "key", key)
+    if cmd == "voice" then pttPress() end
+    if shutdownDialog then return end
     if key == "n" then probeNet() end
-    if key == "t" then pttPress() end
+    if cmd == "confirm" or cmd == "back" or cmd == "right" then runFinder(cmd) end
 end
 
 function love.keyreleased(key)
-    if key == "t" then pttRelease() end
+    if key == gamepid.VOICE_KEY then pttRelease() end
 end
 
 function love.joystickpressed(joy, button)
@@ -817,13 +981,16 @@ function love.joystickpressed(joy, button)
         end
         return
     end
-    if button == 2 then                         -- B
+    local cmd = gamepid.press(padPhase(), "button", button)
+    if cmd == "voice" then
+        pttPress()
+    elseif cmd == "confirm" or cmd == "back" or cmd == "right" then
+        runFinder(cmd)
+    elseif cmd == "net" then
         probeNet()
-    elseif button == 7 then                     -- SELECT
+    elseif cmd == "quit" then
         pttRelease()
         shutdownDialog = true
-    elseif button == PTT_BUTTON then
-        pttPress()
     end
 end
 
@@ -833,6 +1000,9 @@ end
 
 function love.joystickhatpressed(_, hat, value)
     recordInput("hat", hat, HAT_NAMES[value] or value)
+    if shutdownDialog then return end
+    local cmd = gamepid.press(padPhase(), "hat", value)
+    if cmd == "back" or cmd == "right" then runFinder(cmd) end
 end
 
 function love.joystickaxis(joy, axis, value)
@@ -941,11 +1111,43 @@ local function drawSky()
     love.graphics.circle("fill", 80, 470, 150)
 end
 
+local function fitWidth(font, text, limit, keepTail)
+    text = text or ""
+    if font:getWidth(text) <= limit then return text end
+    if keepTail then
+        local tail = text
+        while #tail > 1 and font:getWidth("…" .. tail) > limit do
+            tail = tail:sub(2)
+        end
+        return "…" .. tail
+    end
+    local head = text
+    while #head > 1 and font:getWidth(head .. "…") > limit do
+        head = head:sub(1, -2)
+    end
+    return head .. "…"
+end
+
 local function drawHint()
-    color("cream", 0.7)
     love.graphics.setFont(fonts[9])
+    if panel.phase == "running" then
+        color("cream", 0.85)
+        local hint = fitWidth(fonts[9], gamepid.runningHint(panel) or "", W - 24, false)
+        love.graphics.printf(hint, 0, H - 16, W, "center")
+        return
+    end
+    if type(panel.notice) == "string" and panel.notice ~= "" then
+        color("pink")
+        local hint = fitWidth(fonts[9], panel.notice, W - 24, false)
+        love.graphics.printf(hint, 0, H - 16, W, "center")
+        return
+    end
+    color("cream", 0.7)
     local hint
-    if aid.hasLog() then
+    local phase = padPhase()
+    if phase == "finder" or phase == "failed" then
+        hint = "HOLD R1 TALK  ·  SELECT QUIT"
+    elseif aid.hasLog() then
         hint = "D-PAD UP  OLDER   ·   D-PAD DOWN  NEWER   ·   HOLD R1 TALK   ·   SELECT QUIT"
     else
         hint = "HOLD R1 TALK  ·  B NET  ·  SELECT QUIT"
@@ -1246,8 +1448,72 @@ function drawFingerMark()
     love.graphics.print(string.format("TOUCH  %.0f, %.0f", x, y), math.min(x + 20, W - 160), math.min(y + 20, H - 28))
 end
 
+local function drawStop()
+    if panel.phase ~= "running" then return end
+    local list = targets.layout({game = true})
+    for i = 1, #list do
+        local target = list[i]
+        if target.id == "stop" then
+            drawRoundedBox(target.x, target.y, target.w, target.h, 10, "ink", 0.92)
+            color("gold")
+            love.graphics.setFont(fonts[12])
+            love.graphics.printf(target.label, target.x, target.y + 16, target.w, "center")
+        end
+    end
+end
+
+local function drawFinder()
+    if not finderState then return end
+    color("sky")
+    love.graphics.rectangle("fill", 0, 0, W, H)
+    drawRoundedBox(12, 8, 616, 36, 8, "ink", 0.92)
+    color("gold")
+    love.graphics.setFont(fonts[10])
+    love.graphics.print("WORK", 24, 18)
+    color("cream")
+    love.graphics.setFont(fonts[12])
+    love.graphics.print(fitWidth(fonts[12], finderState.path, 520, true), 78, 16)
+
+    drawRoundedBox(12, 52, 616, 380, 8, "ink", 0.9)
+    local window = finder.window(finderState)
+    local font = fonts[14]
+    love.graphics.setFont(font)
+    local rowH = 28
+    for i = 1, #window.rows do
+        local row = window.rows[i]
+        local y = 56 + (i - 1) * rowH
+        if i == window.cursor then
+            color("gold", 0.35)
+            love.graphics.rectangle("fill", 18, y, 604, rowH - 2, 4, 4)
+        end
+        local name = row.name
+        if row.slash then name = name .. "/" end
+        local nameLimit = 560
+        if row.tag then nameLimit = nameLimit - font:getWidth(row.tag) - 16 end
+        color("cream", row.dim and 0.62 or 1)
+        love.graphics.print(fitWidth(font, name, nameLimit, false), 28, y + 5)
+        if row.tag then
+            color(row.startable and "mint" or "cream", row.startable and 1 or 0.62)
+            love.graphics.printf(row.tag, 28, y + 5, 584, "right")
+        end
+    end
+
+    local selected = finder.selected(finderState)
+    local kindColor = "gold"
+    if finderState.error or (selected and selected.game and not selected.startable) then
+        kindColor = "pink"
+    end
+    color(kindColor)
+    love.graphics.setFont(fonts[10])
+    love.graphics.print(fitWidth(fonts[10], finder.kindLine(finderState), 600, false), 24, 440)
+    color("cream", 0.7)
+    love.graphics.setFont(fonts[9])
+    love.graphics.print(gamepid.FINDER_HINT, 24, 464)
+end
+
 function love.draw()
     drawInfoScreen()
+    drawStop()
 
     if shutdownDialog then
         color("ink", 0.7)
@@ -1261,8 +1527,8 @@ function love.draw()
         love.graphics.printf("A confirm  /  B cancel", 0, 234, W, "center")
     end
 
-    if hud.external then
-        subscreen.present(function() end)
+    if subscreen.isOpen() then
+        subscreen.present(drawFinder)
     end
 
     if selftest then
