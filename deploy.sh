@@ -87,7 +87,7 @@ opencode_should_skip_upload() {
 echo ">> 目标: $TARGET"
 echo ">> 复制应用代码"
 rssh "$TARGET" "mkdir -p '$GAME/bin' '$GAME/lib' '$APPS/Imgs'"
-rscp main.lua conf.lua screens.lua subscreen.lua evdev.lua touchpoll.lua touchthread.lua micwave.lua micthread.lua stt.lua sttthread.lua aid.lua aidthread.lua rgds-aid.py alsoft.conf run-via-menu.sh "$TARGET:$GAME/"
+rscp main.lua conf.lua screens.lua serverstate.lua targets.lua subscreen.lua evdev.lua touchpoll.lua touchthread.lua micwave.lua micthread.lua stt.lua sttthread.lua aid.lua aidthread.lua rgds-aid.py alsoft.conf run-via-menu.sh "$TARGET:$GAME/"
 rssh "$TARGET" "chmod +x '$GAME/run-via-menu.sh'"
 
 if [ -d opencode ]; then

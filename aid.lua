@@ -327,11 +327,18 @@ local function finishIdle()
     takePending()
 end
 
+function M.askStatus()
+    if not jobChannel or not thread or not thread:isRunning() then return false end
+    jobChannel:push({op = "status"})
+    return true
+end
+
 function M.update()
     refreshSetup()
     if evChannel then
         local msg = evChannel:pop()
         while msg do
+            if M.onEvent then M.onEvent(msg) end
             local mine = msg.id == nil or msg.id == M.reqId
             if msg.ev == "ready" then
                 if M.phase == "loading" then
@@ -420,6 +427,9 @@ function M.update()
         M.detail = "AI helper off"
         M.reqId = nil
         bump()
+        if M.onEvent then
+            M.onEvent({ev = "error", kind = "helper", msg = "AI helper off"})
+        end
         if err then
             print("aid: thread " .. (tostring(err):match("^[^\n]+") or "error"))
             io.stdout:flush()
