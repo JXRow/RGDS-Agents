@@ -1130,6 +1130,8 @@ class WireTest(unittest.TestCase):
             client.send({"op": "chat", "id": "r1", "text": "hi"})
             self.assertTrue(self.mock.list_ready.wait(2))
             client.send({"op": "cancel", "id": "r1"})
+            client.send({"op": "status"})
+            self.assertEqual(client.recv(timeout=2)["ev"], "status")
             self.mock.list_gate.set()
             err = client.recv(timeout=2)
         finally:
