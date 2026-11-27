@@ -38,7 +38,9 @@ check("requires targets", main:find('require("targets")', 1, true) ~= nil)
 check("no touch info log", main:find("touch: info", 1, true) == nil)
 check("no finger mark", main:find("drawFingerMark", 1, true) == nil)
 check("no TOUCH label", main:find("TOUCH  ", 1, true) == nil)
-check("game stays off", main:find("game = false", 1, true) ~= nil)
+check("game target follows running phase", main:find('game = panel.phase == "running"', 1, true) ~= nil)
+check("no overlapping drawStop", main:find("drawStop", 1, true) == nil)
+check("joystickhat callback", main:find("function love.joystickhat(", 1, true) ~= nil)
 check("stop script", main:find("engines/stop.sh", 1, true) ~= nil)
 check("no server password path", main:find("server.password", 1, true) == nil)
 check("chat held", main:find("not serverRow.holdChat", 1, true) ~= nil)
@@ -168,6 +170,9 @@ do
     local lastToken = 0
     local clipCount = 0
     local infoCallback = nil
+    local gamepidMod = require("gamepid")
+    local savedPidFile = gamepidMod.PID_FILE
+    gamepidMod.PID_FILE = root .. "/.tmp-server-wire-missing.pid"
     local savedPaths = {
         configFile = serverstate.paths.configFile,
         setupFile = serverstate.paths.setupFile,
@@ -372,6 +377,18 @@ do
         now = now + 20
         love.update(0.016)
         check("running state still re-probes periodically", #startedCmds == runningProbes + 1, #startedCmds - runningProbes)
+
+        -- Verify LÖVE 11.5 joystickhat and touch/mouse release callbacks are wired.
+        check("love.joystickhat callback defined", type(love.joystickhat) == "function")
+        check("love.mousereleased callback defined", type(love.mousereleased) == "function")
+        check("love.touchreleased callback defined", type(love.touchreleased) == "function")
+        local hatOk, hatErr = pcall(function()
+            love.joystickhat(nil, 1, "r")
+            love.joystickhat(nil, 1, "l")
+            love.mousepressed(500, 20, 1)
+            love.mousereleased(500, 20, 1)
+        end)
+        check("joystickhat and mouse release run cleanly", hatOk, hatErr)
     end
 
     _G.print = savedPrint
@@ -379,6 +396,7 @@ do
     for name, mod in pairs(savedLoaded) do package.loaded[name] = mod end
     serverstate.paths.configFile = savedPaths.configFile
     serverstate.paths.setupFile = savedPaths.setupFile
+    gamepidMod.PID_FILE = savedPidFile
     os.remove(tmpCfg)
 end
 

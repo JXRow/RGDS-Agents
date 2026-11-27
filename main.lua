@@ -36,7 +36,6 @@ local aidSeen = 0
 local gamepid = require("gamepid")
 local finder = require("finder")
 local engines = require("engines")
-local targets = require("targets")
 local PTT_BUTTON = gamepid.VOICE_BUTTON  -- R1：A/B/START/SELECT 已占用，食指按住不影响移动和 A
 local ptt = {held = false, bgmPaused = false}
 local touchGoal = nil
@@ -48,6 +47,7 @@ local targets = require("targets")
 local beginFromTap
 local clampPlay
 local serverRow
+local panel = gamepid.blank()
 local INPUT_LOG = "/tmp/rgds-input-v2.log"
 local shotRequested = false
 local shotTaken = false
@@ -484,7 +484,7 @@ local function refreshServerRow()
 end
 
 local function serverTargets()
-    return targets.layout({action = serverRow.action, game = false})
+    return targets.layout({action = serverRow.action, game = panel.phase == "running"})
 end
 
 local function reapWizards()
@@ -773,12 +773,13 @@ local function placeMainWindow(oneScreen)
     return screens.plan(1), "could not move the main window"
 end
 
-local panel = gamepid.blank()
 local finderState
 local heldClosed = false
 local startBusy = false
 local stopAsked = false
+local stopBusy = false
 local touchGesture
+local noteGesture
 local gamePoll = 0
 local finderArm
 local START_DIR = "/tmp/rgds-panel-start"
@@ -849,10 +850,20 @@ local function pollGameNow()
             panel = gamepid.fail(panel, result.notice)
         end
     end
-    gamepid.finish(STOP_DIR, nil)
+    local stopResult = gamepid.finish(STOP_DIR, nil)
+    if stopResult then
+        stopBusy = false
+        if not stopResult.ok then
+            stopAsked = false
+            panel = gamepid.fail(panel, stopResult.notice)
+        end
+    end
     local prev = panel.phase
     local effect
     panel, effect = gamepid.observe(panel, gamepid.read(nil))
+    if panel.phase == "running" then
+        shutdownDialog = false
+    end
     if prev == "running" and panel.phase ~= "running" then
         if stopAsked then panel = gamepid.clearNotice(panel) end
         stopAsked = false
@@ -868,9 +879,13 @@ local function pollGame(dt)
 end
 
 local function stopGame()
-    if panel.phase ~= "running" then return end
-    stopAsked = true
-    gamepid.begin(engines.stop, nil, STOP_DIR)
+    if panel.phase ~= "running" or stopBusy then return end
+    if gamepid.begin(engines.stop, nil, STOP_DIR) then
+        stopAsked = true
+        stopBusy = true
+    else
+        panel = gamepid.fail(panel, "could not run the stop script")
+    end
 end
 
 -- touchpoll 是下屏真正的点。noteFinger 仍给 evdev / SDL / 鼠标，两边都认 STOP GAME。
@@ -974,16 +989,18 @@ function love.load()
     aid.start()
     windowW, windowH = love.graphics.getWidth(), love.graphics.getHeight()
 
-    if not screenPlan.openSecondWindow then
+    finderState = finder.open({
+        appDir = love.filesystem.getSource(),
+        engineOf = engines.forFinder,
+    })
+    pollGameNow()
+    if panel.phase == "running" then
+        heldClosed = true
+    elseif not screenPlan.openSecondWindow then
         hud.error = placeErr or (oneScreen and "disabled by --one-screen" or "single display")
     else
         openTop()
     end
-    finderState = finder.open({
-        appDir = love.filesystem.getSource(),
-        engineOf = gamepid.engineOf,
-    })
-    pollGameNow()
     if subscreen.isOpen() then
         print(string.format("subscreen: finder on display %d (main window on display %d)",
             subscreen.display, subscreen.mainDisplay))
@@ -1162,8 +1179,12 @@ end
 
 -- evdev、SDL 和鼠标也会进到这里。下屏目标只认 touchpoll 的坐标。
 function noteFinger(phase, x, y)
+    if shutdownDialog or selftest then
+        noteGesture = nil
+        return
+    end
     local cmd
-    cmd, touchGesture = gamepid.finger(padPhase(), touchGesture, phase, x, y)
+    cmd, noteGesture = gamepid.finger(padPhase(), noteGesture, phase, x, y)
     if cmd == "stop" then stopGame() end
 end
 
@@ -1285,6 +1306,12 @@ end
 function love.joystickpressed(joy, button)
     local name = BUTTONS[button] or ("BTN" .. button)
     recordInput("joystick", button, name)
+    if panel.phase == "running" then
+        if gamepid.press("running", "button", button) == "voice" then
+            pttPress()
+        end
+        return
+    end
     if shutdownDialog then
         if button == 1 then
             playSfx("shutdown")
@@ -1311,7 +1338,7 @@ function love.joystickreleased(joy, button)
     if button == PTT_BUTTON then pttRelease() end
 end
 
-function love.joystickhatpressed(_, hat, value)
+function love.joystickhat(_, hat, value)
     recordInput("hat", hat, HAT_NAMES[value] or value)
     if shutdownDialog then return end
     local cmd = gamepid.press(padPhase(), "hat", value)
@@ -1334,12 +1361,24 @@ function love.touchmoved(id, x, y)
     noteFinger("move", toGame(x, y))
 end
 
+function love.touchreleased(id, x, y)
+    local gx, gy = toGame(x, y)
+    noteFinger(false, gx, gy)
+end
+
 function love.mousepressed(x, y, button)
     local gx, gy = toGame(x, y)
     recordInput("mouse", button, string.format("%.0f,%.0f", gx, gy))
     if button ~= 1 then return end
     if love.touch and #love.touch.getTouches() > 0 then return end
     noteFinger(true, gx, gy)
+end
+
+function love.mousereleased(x, y, button)
+    if button ~= 1 then return end
+    if love.touch and #love.touch.getTouches() > 0 then return end
+    local gx, gy = toGame(x, y)
+    noteFinger(false, gx, gy)
 end
 
 -- === 绘制 ===
@@ -1424,21 +1463,38 @@ local function drawSky()
     love.graphics.circle("fill", 80, 470, 150)
 end
 
+local function utf8Starts(text)
+    local starts = {}
+    local i, n = 1, #text
+    while i <= n do
+        local b = text:byte(i)
+        if b < 128 or b >= 192 then
+            starts[#starts + 1] = i
+        end
+        i = i + 1
+    end
+    return starts
+end
+
 local function fitWidth(font, text, limit, keepTail)
     text = text or ""
     if font:getWidth(text) <= limit then return text end
+    local ellipsis = (font == fonts.cjk) and "…" or "..."
+    local starts = utf8Starts(text)
+    local count = #starts
+    if count <= 1 then return ellipsis end
     if keepTail then
-        local tail = text
-        while #tail > 1 and font:getWidth("…" .. tail) > limit do
-            tail = tail:sub(2)
+        for k = 2, count do
+            local candidate = ellipsis .. text:sub(starts[k])
+            if font:getWidth(candidate) <= limit then return candidate end
         end
-        return "…" .. tail
+        return ellipsis .. text:sub(starts[count])
     end
-    local head = text
-    while #head > 1 and font:getWidth(head .. "…") > limit do
-        head = head:sub(1, -2)
+    for k = count, 2, -1 do
+        local candidate = text:sub(1, starts[k] - 1) .. ellipsis
+        if font:getWidth(candidate) <= limit then return candidate end
     end
-    return head .. "…"
+    return ellipsis
 end
 
 local function drawHint()
@@ -1800,20 +1856,6 @@ local function drawInfoScreen()
     drawHint()
 end
 
-local function drawStop()
-    if panel.phase ~= "running" then return end
-    local list = targets.layout({game = true})
-    for i = 1, #list do
-        local target = list[i]
-        if target.id == "stop" then
-            drawRoundedBox(target.x, target.y, target.w, target.h, 10, "ink", 0.92)
-            color("gold")
-            love.graphics.setFont(fonts[12])
-            love.graphics.printf(target.label, target.x, target.y + 16, target.w, "center")
-        end
-    end
-end
-
 local function drawFinder()
     if not finderState then return end
     color("sky")
@@ -1865,7 +1907,6 @@ end
 
 function love.draw()
     drawInfoScreen()
-    drawStop()
 
     if shutdownDialog then
         color("ink", 0.7)

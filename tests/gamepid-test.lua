@@ -250,6 +250,15 @@ if loveRec then
         check(type(loveRec.hint) == "string" and loveRec.hint ~= "", "a missing binary keeps an install hint")
     end
 end
+do
+    local savedBin = engines.list[1].binary
+    local fakeBin = writeScript("fake-love", "#!/bin/sh\nexit 0\n")
+    engines.list[1].binary = fakeBin
+    local readyRec = gamepid.engineOf(loveDir, "dir", {"main.lua"})
+    engines.list[1].binary = savedBin
+    check(readyRec and readyRec.startable == true, "installed engine binary is startable")
+    check(readyRec and readyRec.hint == nil, "installed engine has nil install hint")
+end
 check(gamepid.engineOf(loveDir, "file", nil) == nil, "the same directory is not a file game")
 check(gamepid.engineOf(tmp .. "/game.pak", "file", nil).id == "openbor", "a pak file is OpenBOR")
 check(gamepid.engineOf(tmp .. "/menu.pak", "file", nil) == nil, "menu.pak is not a game")

@@ -260,17 +260,7 @@ function M.repeatDir(phase, hat, up, down)
 end
 
 function M.engineOf(path, kind, names)
-    local mapped = kind == "dir" and "directory" or kind
-    local entry = engines.match(path, mapped, names)
-    if not entry then return nil end
-    local ok = engines.startable(entry)
-    return {
-        id = entry.id,
-        label = entry.label,
-        startable = ok,
-        hint = ok and nil or engines.installHint(entry),
-        start = entry.start,
-    }
+    return engines.forFinder(path, kind, names)
 end
 
 function M.finger(phase, gesture, touchPhase, x, y)
@@ -289,12 +279,14 @@ function M.begin(script, gamePath, dir)
     local status = os.execute("mkdir -p " .. shQuote(dir))
     if not (status == true or status == 0) then return false end
     os.remove(dir .. "/code")
+    os.remove(dir .. "/code.tmp")
     local args = ""
     if gamePath ~= nil then args = " " .. shQuote(gamePath) end
     local cmd = "(" .. shQuote(script) .. args
         .. " >" .. shQuote(dir .. "/out")
         .. " 2>" .. shQuote(dir .. "/err")
-        .. " </dev/null; echo $? >" .. shQuote(dir .. "/code")
+        .. " </dev/null; printf '%s\\n' \"$?\" >" .. shQuote(dir .. "/code.tmp")
+        .. " && mv -f " .. shQuote(dir .. "/code.tmp") .. " " .. shQuote(dir .. "/code")
         .. ") >/dev/null 2>&1 &"
     status = os.execute(cmd)
     return status == true or status == 0
@@ -307,9 +299,9 @@ function M.finish(dir, secret)
     if not handle then return nil end
     local raw = handle:read("*a") or ""
     handle:close()
-    os.remove(codePath)
     local code = tonumber(raw:match("(%d+)"))
     if not code then return nil end
+    os.remove(codePath)
     local function take(name)
         local path = dir .. "/" .. name
         local handle = io.open(path, "r")
