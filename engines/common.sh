@@ -371,13 +371,12 @@ rgds_launch_game() {
     # Ignore HUP so the engine survives the shell tool returning.
     # setsid is not used: whether that tool kills the process group
     # when the call returns is unconfirmed on a device.
-    trap '' HUP
+    # exec sh -c publishes RGDS_GAME_ID in /proc/<pid>/environ before
+    # RGDS_GAME_START_DELAY so gamepid.read and stop.sh see the launch
+    # while the finder window closes.
     unset _rgds_pw OPENCODE_PASSWORD XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME || true
-    cd -- "$_cwd" || exit 1
-    if [ "$RGDS_GAME_START_DELAY" != 0 ]; then
-      sleep "$RGDS_GAME_START_DELAY" || exit 1
-    fi
-    exec "$_bin" "$_game"
+    exec sh -c 'trap "" HUP; cd -- "$1" || exit 1; if [ "$2" != 0 ]; then sleep "$2" || exit 1; fi; exec "$3" "$4"' \
+      rgds-game "$_cwd" "$RGDS_GAME_START_DELAY" "$_bin" "$_game"
   ) >> "$RGDS_GAME_LOG" 2>&1 </dev/null &
   _pid=$!
   unset RGDS_GAME_ID || true
