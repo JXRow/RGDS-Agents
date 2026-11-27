@@ -1,6 +1,6 @@
 # Agents
 
-Touch, the info panel, or the GT911: follow [TOUCH.md](TOUCH.md). The game panel does not receive a finger.
+Touch, the bottom panel, or the GT911: follow [TOUCH.md](TOUCH.md). The top panel does not receive a finger.
 
 Deploy, relaunch, sound, and the gamepad: follow [README.md](README.md) Setup and the header of `run-via-menu.sh`.
 
