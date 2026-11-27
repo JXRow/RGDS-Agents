@@ -56,6 +56,15 @@ local function is_absent(err, eno)
     return err:find("No such file or directory", 1, true) ~= nil
 end
 
+local function sh_quote(text)
+    return "'" .. tostring(text):gsub("'", "'\\''") .. "'"
+end
+
+local function cmd_ok(cmd)
+    local status = os.execute(cmd)
+    return status == true or status == 0
+end
+
 local function strip_slashes(path)
     if path == "/" then return "/" end
     local stripped = path:gsub("/+$", "")
@@ -159,6 +168,10 @@ function M.resolve(game_path)
     if as_dir then
         as_dir:close()
         return pack(nil, false, nil, "file", path, "voice file is a directory")
+    end
+    -- test does not open the path. A FIFO at rgds-voice must not block io.open.
+    if cmd_ok("test -e " .. sh_quote(path) .. " -a ! -f " .. sh_quote(path)) then
+        return pack(nil, false, nil, "file", path, "voice file is not a regular file")
     end
     local fh, oerr, eno = io.open(path, "rb")
     if not fh then

@@ -276,6 +276,15 @@ local function run_cases(tmp)
         path = tmp .. "/voice-dir/rgds-voice",
     })
 
+    mkdir(tmp .. "/fifo-game")
+    run("mkfifo " .. sh_quote(tmp .. "/fifo-game/rgds-voice"))
+    local fifo = voicebutton.resolve(tmp .. "/fifo-game")
+    expect("a fifo voice file is not opened", fifo, {
+        err = "voice file is not a regular file", button = NIL, source = "file",
+        path = tmp .. "/fifo-game/rgds-voice",
+    })
+    check("a fifo voice file does not listen", not voicebutton.listens(fifo))
+
     mkdir(tmp .. "/oversized")
     write_file(tmp .. "/oversized/rgds-voice", string.rep(" ", 300) .. "6\n")
     local oversized = voicebutton.resolve(tmp .. "/oversized")
