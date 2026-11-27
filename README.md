@@ -30,7 +30,7 @@ The server row is one state word, one detail line, and one action, and this tree
 | Starting | `start` has not returned, health has been `unhealthy` for under 15 seconds, or the adapter has not said `net: ok`. Chat is held. | none |
 | Running | Status exits 0 with `health: ok`, and the adapter says `net: ok`. The detail is the server version. | RESTART |
 | Failed | Status is `stopped`, `start` exits 1, health stays unhealthy for 15 seconds, or the adapter reports `offline`, `server`, or `helper`. The log is `/tmp/opencode-serve.log`. | START |
-| Auth problem | The adapter reports `auth`. An unreadable password file, or `HTTP 401` / `HTTP 403` from the local server, is the password case. Any other auth message is the provider key. | RESTART for the password, WIZARD for the key |
+| Auth problem | The adapter reports `auth`. An unreadable password file, or `HTTP 401` / `HTTP 403` from the local server, is the password case. Any other auth message is the provider key. | RESTART for the password, WIZARD for the key while no setup token is showing |
 
 The chat log tags a row YOU, a language code, PC, or AI. A PC row is a `remote_user` turn. A tool line is gold, `name: title` or the tool name. The setup token and URL stay on the first chat row while `/tmp/opencode-setup.json` is valid. The mic strip sits under the chat. Hold R1, or press `t`, for one voice clip.
 
@@ -49,7 +49,7 @@ The pad, once the menu has exited:
 
 This app's own directory has a `main.lua` and is still only a folder.
 
-While a game runs, the bottom hint names the engine, the game, and the voice button, and STOP GAME is shown. If the start script exits 1, the finder stays and the bottom hint is pink with the script's line, cut at 180 characters.
+While a game runs, the bottom hint names the engine, the game, and the voice button, and STOP GAME is shown. If the start script exits 1, the finder stays (or reopens if the engine exited during the startup watch) and the bottom hint is pink with the script's last line, cut at 180 bytes and clipped to fit the row.
 
 ## Work directory
 
@@ -84,7 +84,7 @@ The finder and the agent's shell tool run the same script. A user's game is laun
 
 On the device those paths sit under `/mnt/mmc/Roms/APPS/RGDS-Agents/`.
 
-The start script refuses a path that is missing or outside the work directory. If `/tmp/rgds-game.pid` names a live game, it stops that game first, so a second start is the reload after an edit. It clears `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, and `OPENCODE_PASSWORD` before the engine runs, then starts the engine in the background, ignoring `HUP`, and returns. The pid file is three lines: the pid, the engine id (`love` or `openbor`), and the absolute game path. The log is `/tmp/rgds-game.log`. `engines/stop.sh` sends `SIGTERM`, then `SIGKILL` after 2 seconds, and removes the pid file. The scripts do not print the server password.
+The start script refuses a path that is missing, outside the work directory, or this app's own directory. If `/tmp/rgds-game.pid` names a live game, it stops that game first, so a second start is the reload after an edit. It clears `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, and `OPENCODE_PASSWORD` before the engine runs, then starts the engine in the background, ignoring `HUP`, and returns. The pid file is three lines: the pid, the engine id (`love` or `openbor`), and the absolute game path. The log is `/tmp/rgds-game.log`. `engines/stop.sh` sends `SIGTERM`, then `SIGKILL` after 2 seconds, and removes the pid file. The scripts do not print the server password.
 
 The agent edits the game with its own tools, then runs the same start script to reload. LÖVE's launcher exports are `LD_LIBRARY_PATH`, `ALSOFT_CONF`, and `SDL_VIDEO_DOUBLE_BUFFER`, and they are for `bin/love` only. The OpenBOR script uses `engines/openbor/` as its library path and unsets those two LÖVE variables.
 
@@ -96,9 +96,9 @@ A game that needs R1 has a one-line file. Inside a game directory the name is `r
 
 `1` A, `2` B, `3` Y, `4` X, `5` L1, `6` R1, `7` SELECT, `8` START, `10` L3, `11` L2, `12` R2, `13` R3.
 
-No file means R1. `none` turns voice off while that game runs. The user taps STOP GAME, talks with R1 in the finder, and starts the game again. The agent writes the file when it builds or changes a game, and leaves R1 free when it can. The bottom hint names the button, for example `HOLD L2 TALK`, or `VOICE OFF`.
+No file means R1. `none` turns voice off while that game runs. The user taps STOP GAME, talks with R1 in the finder, and starts the game again. The agent writes the file when it builds or changes a game, and leaves R1 free when it can. When wired into `main.lua`, the bottom hint names the button, for example `HOLD L2 TALK`, or `VOICE OFF`.
 
-The reader is on `cursor/voice-button-map-63af`. This branch's running hint is still `HOLD R1 TALK` from `gamepid.lua`.
+`voicebutton.lua` is in the tree, but `main.lua` does not load it yet. Until that wiring lands, the running hint stays `HOLD R1 TALK` from `gamepid.lua`.
 
 ## Setup
 
@@ -180,7 +180,7 @@ These still need a device:
 
 1. After the finder window closes, Weston giving the top output to the game.
 2. A game opening ALSA playback while this app holds an OpenAL device.
-3. This app still receiving the voice button while a game has the pad. Both can read `event3`. The start scripts do not set `SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS`.
+3. This app still receiving the voice button while a game has the pad. Both can read `event3`. This app's launcher does not set `SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS`.
 4. A game started from the agent's shell tool still running after that call returns, and after a server restart. The start script ignores `HUP` and does not call `setsid`.
 5. OpenBOR: an arm64 binary and its libraries on the device, which display it opens on, and a loose `data` directory start.
 6. Replacing `/userdata/opencode/config/opencode/AGENTS.md` on a device that already has one. The service copies the file only when the destination is missing.

@@ -32,7 +32,7 @@ You run inside `opencode serve` on an Anbernic RG DS handheld. This app is the o
 - LÖVE: `/mnt/mmc/Roms/APPS/RGDS-Agents/engines/love/start.sh <game path>`
 - OpenBOR: `/mnt/mmc/Roms/APPS/RGDS-Agents/engines/openbor/start.sh <game path>`
 - Stop: `/mnt/mmc/Roms/APPS/RGDS-Agents/engines/stop.sh`
-- The game path has to exist inside the work directory.
+- The game path has to exist inside the work directory and cannot be this app's own directory.
 - A second start stops the game that is running and starts again. Edit the game, then run the same start script to reload it.
 - `/tmp/rgds-game.pid` is three lines: the pid, the engine id (`love` or `openbor`), and the absolute game path. The log is `/tmp/rgds-game.log`.
 - LÖVE: edit the Lua files and assets in the game directory. A `.love` is a zip, so unpack it to a directory and edit there.
