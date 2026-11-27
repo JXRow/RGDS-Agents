@@ -46,7 +46,10 @@ local function absent_tail()
     return missing_tail
 end
 
-local function is_absent(err)
+local MAX_BYTES = 256
+
+local function is_absent(err, eno)
+    if eno == 2 then return true end
     if type(err) ~= "string" then return false end
     local tail = absent_tail()
     if tail and err:sub(-#tail) == tail then return true end
@@ -157,18 +160,22 @@ function M.resolve(game_path)
         as_dir:close()
         return pack(nil, false, nil, "file", path, "voice file is a directory")
     end
-    local fh, oerr = io.open(path, "rb")
+    local fh, oerr, eno = io.open(path, "rb")
     if not fh then
-        if is_absent(oerr) then
+        if is_absent(oerr, eno) then
             local button = M.DEFAULT_BUTTON
             return pack(button, false, M.NAMES[button], "default", path, nil)
         end
         return pack(nil, false, nil, "file", path, oerr or "cannot open voice file")
     end
-    local body, rerr = fh:read("*a")
+    local body, rerr = fh:read(MAX_BYTES + 1)
     fh:close()
-    if body == nil then
-        return pack(nil, false, nil, "file", path, rerr or "cannot read voice file")
+    if rerr ~= nil then
+        return pack(nil, false, nil, "file", path, rerr)
+    end
+    body = body or ""
+    if #body > MAX_BYTES then
+        return pack(nil, false, nil, "file", path, "voice file is too large")
     end
     local button, perr = M.parse(body)
     if perr then

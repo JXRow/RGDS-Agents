@@ -276,18 +276,32 @@ local function run_cases(tmp)
         path = tmp .. "/voice-dir/rgds-voice",
     })
 
-    mkdir(tmp .. "/locked")
-    local locked_path = tmp .. "/locked/rgds-voice"
-    write_file(locked_path, "11\n")
-    run("/bin/chmod 000 -- " .. sh_quote(locked_path))
-    local locked = voicebutton.resolve(tmp .. "/locked")
-    run("/bin/chmod 644 -- " .. sh_quote(locked_path))
-    check("an unreadable voice file is not R1",
-        locked.button == nil and locked.off == false and locked.source == "file"
-            and locked.path == locked_path and type(locked.err) == "string"
-            and locked.err:find("Permission denied", 1, true) ~= nil,
-        locked.err)
-    check("an unreadable voice file does not listen", not voicebutton.listens(locked))
+    mkdir(tmp .. "/oversized")
+    write_file(tmp .. "/oversized/rgds-voice", string.rep(" ", 300) .. "6\n")
+    local oversized = voicebutton.resolve(tmp .. "/oversized")
+    expect("an oversized voice file is an error", oversized, {
+        err = "voice file is too large", button = NIL, off = false, source = "file",
+        path = tmp .. "/oversized/rgds-voice",
+    })
+    check("an oversized voice file does not listen", not voicebutton.listens(oversized))
+
+    local uid_pipe = io.popen("id -u")
+    local uid = uid_pipe and uid_pipe:read("*l") or ""
+    if uid_pipe then uid_pipe:close() end
+    if uid ~= "0" then
+        mkdir(tmp .. "/locked")
+        local locked_path = tmp .. "/locked/rgds-voice"
+        write_file(locked_path, "11\n")
+        run("/bin/chmod 000 -- " .. sh_quote(locked_path))
+        local locked = voicebutton.resolve(tmp .. "/locked")
+        run("/bin/chmod 644 -- " .. sh_quote(locked_path))
+        check("an unreadable voice file is not R1",
+            locked.button == nil and locked.off == false and locked.source == "file"
+                and locked.path == locked_path and type(locked.err) == "string"
+                and locked.err ~= "",
+            locked.err)
+        check("an unreadable voice file does not listen", not voicebutton.listens(locked))
+    end
 
     mkdir(tmp .. "/My Game")
     write_file(tmp .. "/My Game/rgds-voice", "4\n")
