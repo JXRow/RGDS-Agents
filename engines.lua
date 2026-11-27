@@ -1,6 +1,7 @@
 -- 引擎表。finder 和启动器只问这张表，自己不写引擎规则。
 -- 按 list 的顺序调用 detect，第一个返回 true 的生效。
--- 启动脚本、finder 画面和 pid 文件不在这里。
+-- finder 画面和 pid 文件不在这里。
+-- M.stop 是共用的 engines/stop.sh。STOP GAME 和 agent 都跑它。
 --
 -- 一条记录有六个字段：
 --   id      短名
@@ -12,7 +13,7 @@
 --           .love 和 .pak 的后缀大小写不敏感，TF 卡是 vfat/exfat。
 -- finder 的 kind 是 "dir"。接线调用 M.forFinder，不要把 M.match 直接当 engineOf：
 -- match 不认 "dir"，返回的记录也没有 startable 和 hint。
---   start   engines/<id>/start.sh 的绝对路径。脚本本身是后面的步骤。
+--   start   engines/<id>/start.sh 的绝对路径。
 --   stop    { signal = "SIGTERM", kill = "SIGKILL", after = 2 }
 --           signal 之后 after 秒再发 kill。两个引擎都用这个默认。
 --   edits   给 agent 的说明，不是代码。
@@ -51,6 +52,8 @@ local function moduleDir()
 end
 
 local APP_ROOT = moduleDir()
+
+M.stop = APP_ROOT .. "/engines/stop.sh"
 
 local function defaultStop()
     return { signal = "SIGTERM", kill = "SIGKILL", after = 2 }
