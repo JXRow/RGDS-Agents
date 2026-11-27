@@ -246,7 +246,7 @@ local function main()
     writeZip(tmp .. "/Game.LOVE", {
         { name = "main.lua", data = "print(1)\n" },
     })
-    check("uppercase .LOVE suffix", tag(tmp .. "/Game.LOVE"), nil)
+    check("uppercase .LOVE suffix", tag(tmp .. "/Game.LOVE"), "LÖVE")
 
     local realLove = tmp .. "/real"
     mkdir(realLove)
@@ -270,7 +270,7 @@ local function main()
     check("name containing .pak but not ending in it", tag(tmp .. "/foo.pak.txt"), nil)
 
     writeFile(tmp .. "/bor.PAK", "pak")
-    check("uppercase .PAK", tag(tmp .. "/bor.PAK"), nil)
+    check("uppercase .PAK", tag(tmp .. "/bor.PAK"), "OpenBOR")
 
     local paks = tmp .. "/Paks"
     mkdir(paks)
@@ -336,6 +336,29 @@ local function main()
         check("directory is not a binary", engines.startable(loveEntry), false)
     end)
     check("binary path restored", pakEntry.binary, appDir .. "/engines/openbor/OpenBOR-arm64")
+
+    local loveRow = engines.forFinder(loveDir, "dir", { "main.lua" })
+    check("finder dir kind is love", loveRow and loveRow.id, "love")
+    check("finder dir label", loveRow.label, "LÖVE")
+    check("finder startable is boolean", type(loveRow.startable), "boolean")
+    check("finder dir startable matches the table", loveRow.startable, engines.startable(engines.list[1]))
+    if loveRow.startable then
+        check("finder dir has no hint", loveRow.hint, nil)
+    else
+        check("finder dir hint", loveRow.hint, engines.installHint(engines.list[1]))
+    end
+    check("match rejects finder dir kind", engines.match(loveDir, "dir", { "main.lua" }), nil)
+    local pakRow = engines.forFinder(tmp .. "/bor.PAK", "file")
+    check("finder uppercase pak", pakRow and pakRow.id, "openbor")
+    check("finder pak label", pakRow.label, "OpenBOR")
+    check("finder pak startable matches the table", pakRow.startable, engines.startable(engines.list[2]))
+    check("finder menu.pak", engines.forFinder(tmp .. "/menu.pak", "file"), nil)
+    check("finder plain file", engines.forFinder(tmp .. "/notes.txt", "file"), nil)
+    withBinary(pakEntry, tmp .. "/stand-in", function()
+        local row = engines.forFinder(tmp .. "/bor.pak", "file")
+        check("finder executable is startable", row.startable, true)
+        check("finder executable has no hint", row.hint, nil)
+    end)
 
     -- 第三个引擎就是多一条记录。插在表头时它先匹配；插在表尾时前面的规则先赢。
     local third = {

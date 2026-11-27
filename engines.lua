@@ -9,6 +9,9 @@
 --   detect  function(path, kind, names) -> boolean
 --           kind 是 "file" 或 "directory"。目录时 names 是顶层名字。
 --           不读文件内容。LÖVE 的 .love 只读 zip 中央目录，不解包。
+--           .love 和 .pak 的后缀大小写不敏感，TF 卡是 vfat/exfat。
+-- finder 的 kind 是 "dir"。接线调用 M.forFinder，不要把 M.match 直接当 engineOf：
+-- match 不认 "dir"，返回的记录也没有 startable 和 hint。
 --   start   engines/<id>/start.sh 的绝对路径。脚本本身是后面的步骤。
 --   stop    { signal = "SIGTERM", kill = "SIGKILL", after = 2 }
 --           signal 之后 after 秒再发 kill。两个引擎都用这个默认。
@@ -228,7 +231,7 @@ local function zipRootHas(path, want)
 end
 
 -- 目录：顶层有文件 main.lua。conf.lua 可有可无，单独存在不算游戏。
--- 文件：名字以 .love 结尾，且 zip 根上有 main.lua。
+-- 文件：名字以 .love 结尾（大小写不敏感），且 zip 根上有 main.lua。
 local function loveDetect(path, kind, names)
     if kind == "directory" then
         names = names or {}
@@ -243,7 +246,7 @@ local function loveDetect(path, kind, names)
         return false
     end
     local base = basename(path)
-    if base:sub(-5) ~= ".love" then
+    if base:lower():sub(-5) ~= ".love" then
         return false
     end
     return zipRootHas(path, "main.lua")
@@ -258,7 +261,7 @@ local function openborDetect(path, kind, names)
         if base:lower() == "menu.pak" then
             return false
         end
-        return base:sub(-4) == ".pak"
+        return base:lower():sub(-4) == ".pak"
     end
     if kind ~= "directory" then
         return false
@@ -346,6 +349,32 @@ function M.kindLine(engine)
         return engine.label
     end
     return M.installHint(engine)
+end
+
+-- finder.engineOf 的形状。kind 接受 "file"、"directory" 和 finder 的 "dir"。
+-- startable 总是布尔值。不能启动时 hint 是安装提示，标签仍是 label。
+function M.forFinder(path, kind, names)
+    if kind == "dir" then
+        kind = "directory"
+    end
+    local entry = M.match(path, kind, names)
+    if not entry then
+        return nil
+    end
+    local startable = M.startable(entry)
+    local row = {
+        id = entry.id,
+        label = entry.label,
+        binary = entry.binary,
+        start = entry.start,
+        stop = entry.stop,
+        edits = entry.edits,
+        startable = startable,
+    }
+    if not startable then
+        row.hint = M.installHint(entry)
+    end
+    return row
 end
 
 return M
