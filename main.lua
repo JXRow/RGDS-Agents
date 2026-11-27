@@ -5,7 +5,7 @@
 -- 麦克风波形与电平（micwave.lua / micthread.lua，经 dsnoop 共享录音）；
 -- 按住 R1（键盘 t）录一段语音。松开后交给常驻的 sv-helper（stt.lua）做离线识别，
 -- 识别出文字后再交给 rgds-aid。回复留在主窗口，长回复换行，十字键上下滚动。
--- gt9xx-0 的触摸在主窗口（下屏）上。手指按下时画十字，并在日志里写一行。手柄保留。
+-- gt9xx-0 的触摸在主窗口（下屏）上。server 行的操作在手指抬起时触发。手柄保留。
 
 local W, H = 640, 480
 local windowW, windowH = W, H
@@ -34,12 +34,14 @@ local aidSeen = 0
 local PTT_BUTTON = 6                     -- R1：A/B/START/SELECT 已占用，食指按住不影响移动和 A
 local ptt = {held = false, bgmPaused = false}
 local touchGoal = nil
-local finger = nil
 local lastTapAt, lastTapX, lastTapY = -10, 0, 0
 local evdev = require("evdev")
 local touchpoll = require("touchpoll")
+local serverstate = require("serverstate")
+local targets = require("targets")
 local beginFromTap
 local clampPlay
+local serverRow
 local INPUT_LOG = "/tmp/rgds-input-v2.log"
 local shotRequested = false
 local shotTaken = false
@@ -245,7 +247,7 @@ end
 -- === 按键录音（push-to-talk） ===
 -- 麦克风会拾到扬声器里的 BGM，录音期间暂停 BGM、静音音效，录完（含 0.2 s 尾巴）再恢复
 local function pttPress()
-    if ptt.held or shutdownDialog then return end
+    if ptt.held or shutdownDialog or serverRow.holdChat then return end
     if not micwave.beginClip() then return end
     aid.dismiss()
     ptt.held = true
@@ -339,6 +341,279 @@ local function pollNet(dt)
     else
         finishNet("n/a", "no curl")
     end
+end
+
+
+-- === OpenCode server 行 ===
+-- 状态脚本在 love.thread 里跑，跟上面的网络探测一样。不看 file:close() 的返回值。
+-- 每帧 serverstate.map 出一行。手指只走 touchpoll，抬起在目标内才触发。
+-- game 保持 false：STOP GAME 留给第 7 步。drawServerRow 会画 layout 里的每一个目标。
+local SERVER_CHANNEL = "rgds-server"
+local SHELL_THREAD = [[
+require("love.thread")
+local channel, token, cmd = ...
+local ok, pipe = pcall(io.popen, cmd)
+local out = ""
+if ok and pipe then
+    out = pipe:read("*a") or ""
+    pipe:close()
+end
+love.thread.getChannel(channel):push({token = token, out = out})
+]]
+local WIZARD_THREAD = [[
+require("love.thread")
+local cmd = ...
+os.execute("(trap '' HUP; exec " .. cmd .. " >/dev/null 2>&1) &")
+]]
+
+local shellJob = nil
+local shellToken = 0
+local queuedAction = nil
+local wizardThreads = {}
+local serverStatusLine, serverStatusExit = nil, nil
+local serverStartPending = false
+local serverStartExit, serverStartLine = nil, nil
+local serverAdapter, serverLastStatus = nil, nil
+local unhealthySince = nil
+local serverPollAt = 0
+local fingerGesture = nil
+serverRow = {
+    state = "starting",
+    word = serverstate.word.starting,
+    detail = "Checking the server",
+    action = nil,
+    holdChat = true,
+}
+
+local SERVER_KIND = {auth = true, offline = true, server = true, helper = true}
+local TURN_KIND = {timeout = true, rate_limit = true, interrupted = true, cancelled = true}
+local SERVER_RUNNING_POLL_S = 15
+
+local function serviceScript()
+    return love.filesystem.getSource() .. "/" .. serverstate.paths.service
+end
+
+local function isAuthError(ev)
+    return type(ev) == "table" and ev.ev == "error" and ev.kind == "auth"
+end
+
+local function noteAdapter(msg)
+    if type(msg) ~= "table" then return end
+    if msg.ev == "status" then
+        serverLastStatus = msg
+        if isAuthError(serverAdapter) then
+            local cause = serverstate.authCause(serverAdapter.msg)
+            if cause == "password" and msg.net == "ok" then
+                serverAdapter = msg
+            end
+        else
+            serverAdapter = msg
+        end
+    elseif msg.ev == "start" or msg.ev == "delta" or msg.ev == "done" then
+        if isAuthError(serverAdapter) then
+            serverAdapter = serverLastStatus
+        end
+    elseif msg.ev == "error" and (SERVER_KIND[msg.kind] or TURN_KIND[msg.kind]) then
+        serverAdapter = msg
+    end
+end
+
+aid.onEvent = noteAdapter
+
+-- config 和 setup 不每帧打开。状态脚本和 adapter 事件仍每帧进 map。
+local SERVER_FILE_S = 0.5
+local serverFilesAt = -1
+local serverFilesDirty = true
+local serverConfigText = nil
+local serverSetupText = nil
+
+local function slurpServerFile(path)
+    local handle = io.open(path, "r")
+    if not handle then return nil end
+    local text = handle:read("*a")
+    handle:close()
+    return text or ""
+end
+
+local function readServerFiles()
+    serverConfigText = slurpServerFile(serverstate.paths.configFile)
+    serverSetupText = slurpServerFile(serverstate.paths.setupFile)
+    serverFilesAt = love.timer.getTime()
+    serverFilesDirty = false
+end
+
+local function refreshServerRow()
+    local now = love.timer.getTime()
+    if serverFilesDirty or serverFilesAt < 0 or now - serverFilesAt >= SERVER_FILE_S then
+        readServerFiles()
+    end
+    local parsed = serverstate.parseStatus(serverStatusLine)
+    local unhealthy = nil
+    if parsed and parsed.health == "unhealthy" then
+        if not unhealthySince then unhealthySince = now end
+        unhealthy = now - unhealthySince
+    else
+        unhealthySince = nil
+    end
+    local src = {
+        statusLine = serverStatusLine,
+        statusExit = serverStatusExit,
+        adapter = serverAdapter,
+        lastStatus = serverLastStatus,
+        phase = aid.phase,
+        startPending = serverStartPending,
+        startExit = serverStartExit,
+        startLine = serverStartLine,
+        unhealthySeconds = unhealthy,
+    }
+    if serverConfigText == nil then
+        src.model = false
+    else
+        src.configText = serverConfigText
+    end
+    if serverSetupText ~= nil then
+        src.setupText = serverSetupText
+    end
+    serverRow = serverstate.map(src)
+end
+
+local function serverTargets()
+    return targets.layout({action = serverRow.action, game = false})
+end
+
+local function reapWizards()
+    local before = #wizardThreads
+    local live = {}
+    for i = 1, #wizardThreads do
+        local thread = wizardThreads[i]
+        local running = false
+        pcall(function() running = thread:isRunning() end)
+        if running then live[#live + 1] = thread end
+    end
+    wizardThreads = live
+    if #live < before then
+        serverFilesDirty = true
+    end
+end
+
+local function spawnWizard()
+    reapWizards()
+    local cmd = serverstate.actionCommand(
+        "wizard", nil, love.filesystem.getSource() .. "/" .. serverstate.paths.wizard)
+    if not cmd then return end
+    local ok, thread = pcall(love.thread.newThread, WIZARD_THREAD)
+    if not ok or not thread then return end
+    local started = false
+    local callOk = pcall(function() started = thread:start(cmd) end)
+    if callOk and started ~= false then
+        wizardThreads[#wizardThreads + 1] = thread
+    end
+end
+
+local function startShell(kind, cmd)
+    if shellJob then return false end
+    shellToken = shellToken + 1
+    local token = shellToken
+    love.thread.getChannel(SERVER_CHANNEL):clear()
+    local ok, thread = pcall(love.thread.newThread, SHELL_THREAD)
+    if not ok or not thread then return false end
+    local started = false
+    local callOk = pcall(function()
+        started = thread:start(SERVER_CHANNEL, token, cmd)
+    end)
+    if not callOk or started == false then return false end
+    shellJob = {thread = thread, kind = kind, token = token}
+    return true
+end
+
+local function launchAction(op)
+    local cmd = serverstate.actionCommand(op, serviceScript())
+    if not cmd or not startShell("action", cmd) then
+        serverStartPending = false
+        return false
+    end
+    return true
+end
+
+local function runServerAction(op)
+    if op == "wizard" then
+        spawnWizard()
+        return
+    end
+    if op ~= "start" and op ~= "restart" then return end
+    if serverStartPending then return end
+    serverStartPending = true
+    serverStartExit, serverStartLine = nil, nil
+    serverStatusLine, serverStatusExit = nil, nil
+    serverAdapter, serverLastStatus = nil, nil
+    unhealthySince = nil
+    if shellJob then
+        queuedAction = op
+        return
+    end
+    launchAction(op)
+end
+
+local function finishShell(out)
+    local kind = shellJob.kind
+    shellJob = nil
+    if kind == "action" then
+        serverStartPending = false
+        if out == nil then
+            serverStartExit, serverStartLine = 1, "start failed"
+        else
+            serverStartLine, serverStartExit = serverstate.parseProbe(out)
+        end
+        serverPollAt = 0
+    elseif out ~= nil then
+        serverStatusLine, serverStatusExit = serverstate.parseProbe(out)
+        local parsed = serverstate.parseStatus(serverStatusLine)
+        if serverStatusExit == 0 and parsed and parsed.health == "ok" then
+            serverStartExit, serverStartLine = nil, nil
+        end
+    end
+    if kind ~= "action" and queuedAction then
+        local op = queuedAction
+        queuedAction = nil
+        launchAction(op)
+    end
+    serverFilesDirty = true
+end
+
+local function takeShell()
+    if not shellJob then return end
+    local msg = love.thread.getChannel(SERVER_CHANNEL):pop()
+    if msg == nil then
+        local failed = false
+        pcall(function() failed = shellJob.thread:getError() ~= nil end)
+        if failed then finishShell(nil) end
+        return
+    end
+    if type(msg) ~= "table" or msg.token ~= shellJob.token then return end
+    finishShell(msg.out or "")
+end
+
+local function maybeProbe()
+    reapWizards()
+    if shellJob then return end
+    local now = love.timer.getTime()
+    if now < serverPollAt then return end
+    local cmd = serverstate.probeCommand(serviceScript())
+    if not startShell("status", cmd) then return end
+    local interval = serverRow.state == "running" and SERVER_RUNNING_POLL_S or serverstate.POLL_S
+    serverPollAt = now + interval
+    aid.askStatus()
+end
+
+local function onInfoFinger(phase, x, y)
+    if shutdownDialog or selftest then
+        fingerGesture = nil
+        return
+    end
+    local fired
+    fired, fingerGesture = targets.step(serverTargets(), fingerGesture, phase, x, y)
+    if not fired or fired.id == "stop" then return end
+    if fired.id == "action" then runServerAction(fired.op) end
 end
 
 -- --shot 模式：依次拍开场 / 游玩 / 确认对话框，然后退出
@@ -581,20 +856,23 @@ function love.load()
     end
     installTouchWatch()
     local tpOk, tpErr = touchpoll.open(function(phase, x, y)
-        noteFinger(phase, x, y)
+        onInfoFinger(phase, x, y)
     end)
     if not tpOk then
         print("touchpoll: off (" .. tostring(tpErr) .. ")")
         io.stdout:flush()
     end
 
+    refreshServerRow()
     if selftest then
         love.filesystem.write("selftest.txt", "")
         probeNet()
+        maybeProbe()
         love.timer.sleep(1.2)     -- 让帧率统计稳定
         return
     end
     probeNet()
+    maybeProbe()
 end
 
 function love.resize(width, height)
@@ -619,13 +897,16 @@ local chatView = 1
 local chatMax = 0
 local chatEpoch = 0
 local chatRev = -1
+local chatHasSetup = false
 local chatOverflow = false
 local scrollArm = nil
 
 local function layoutChat()
-    if chatRev == aid.rev then return end
+    local hasSetup = serverRow.setup ~= nil
+    if chatRev == aid.rev and chatHasSetup == hasSetup then return end
     if aid.hasLog() and not (fonts.cjk or fonts[16]) then return end
     chatRev = aid.rev
+    chatHasSetup = hasSetup
     chatLines = {}
     chatOverflow = false
     chatMax = 0
@@ -633,7 +914,7 @@ local function layoutChat()
     local font = fonts.cjk or fonts[16]
     love.graphics.setFont(font)
     local lh = font:getHeight()
-    local boxH = aid.setup and (CHAT_H - 18) or CHAT_H
+    local boxH = serverRow.setup and (CHAT_H - 18) or CHAT_H
     chatView = math.max(1, math.floor((boxH - 20) / lh))
     local function pushWrapped(tag, body, textColor, textAlpha)
         if body == nil or body == "" then return end
@@ -709,17 +990,8 @@ local function duplicateTap(x, y)
     return false
 end
 
+-- evdev、SDL 和鼠标也会进到这里。下屏目标只认 touchpoll 的坐标。
 function noteFinger(phase, x, y)
-    if phase == false then
-        if finger then finger.down = false end
-        return
-    end
-    local wasDown = finger and finger.down
-    finger = {x = x, y = y, down = true}
-    if phase == "move" and wasDown then return end
-    recordInput("touch", "info", string.format("%.0f,%.0f", x, y))
-    print(string.format("touch: info %.0f,%.0f", x, y))
-    io.stdout:flush()
 end
 
 function beginFromTap(x, y)
@@ -791,7 +1063,11 @@ function love.update(dt)
     micwave.update(dt)
     stt.update()
     aid.update()
-    if stt.serial ~= aidSeen then
+    takeShell()
+    reapWizards()
+    refreshServerRow()
+    maybeProbe()
+    if stt.serial ~= aidSeen and not serverRow.holdChat then
         aidSeen = stt.serial
         if stt.text and stt.text ~= "" then aid.chat(stt.text, stt.lang) end
     end
@@ -939,17 +1215,17 @@ local function drawSetupPanel()
     love.graphics.print("SETUP", 24, 163)
     color("cream")
     love.graphics.setFont(fonts[20])
-    love.graphics.print(aid.setup.token, 84, 168)
+    love.graphics.print(serverRow.setup.token, 84, 168)
     color("mint", 0.9)
     local urlFont = fonts[12]
     love.graphics.setFont(urlFont)
-    local urlX = math.max(176, 84 + fonts[20]:getWidth(aid.setup.token) + 16)
-    local _, urlLines = urlFont:getWrap(aid.setup.url, math.max(40, 616 - urlX))
+    local urlX = math.max(176, 84 + fonts[20]:getWidth(serverRow.setup.token) + 16)
+    local _, urlLines = urlFont:getWrap(serverRow.setup.url, math.max(40, 616 - urlX))
     love.graphics.print(urlLines[1] or "", urlX, 176)
 end
 
 local function drawInputOrSetup()
-    if aid.setup then drawSetupPanel() else drawInputPanel() end
+    if serverRow.setup then drawSetupPanel() else drawInputPanel() end
 end
 
 local function drawSky()
@@ -964,7 +1240,9 @@ local function drawHint()
     color("cream", 0.7)
     love.graphics.setFont(fonts[9])
     local hint
-    if aid.hasLog() then
+    if serverRow.holdChat then
+        hint = "WAIT  ·  CHAT HELD"
+    elseif aid.hasLog() then
         hint = "D-PAD UP  OLDER   ·   D-PAD DOWN  NEWER   ·   HOLD R1 TALK   ·   SELECT QUIT"
     else
         hint = "HOLD R1 TALK  ·  B NET  ·  SELECT QUIT"
@@ -1169,16 +1447,16 @@ local function drawChatLog()
     local lh = font:getHeight()
     local innerX, innerY = x + 10, y + 10
     local innerW, innerH = w - 20, h - 20
-    if aid.setup then
+    if serverRow.setup then
         color("gold")
         love.graphics.setFont(fonts[12])
-        love.graphics.print(aid.setup.token, innerX, innerY)
+        love.graphics.print(serverRow.setup.token, innerX, innerY)
         color("cream", 0.9)
         local urlFont = fonts[11]
         love.graphics.setFont(urlFont)
-        local room = math.max(20, innerW - fonts[12]:getWidth(aid.setup.token) - 16)
-        local _, urlLines = urlFont:getWrap(aid.setup.url, room)
-        love.graphics.print(urlLines[1] or "", innerX + fonts[12]:getWidth(aid.setup.token) + 12, innerY + 1)
+        local room = math.max(20, innerW - fonts[12]:getWidth(serverRow.setup.token) - 16)
+        local _, urlLines = urlFont:getWrap(serverRow.setup.url, room)
+        love.graphics.print(urlLines[1] or "", innerX + fonts[12]:getWidth(serverRow.setup.token) + 12, innerY + 1)
         innerY = innerY + 18
         innerH = innerH - 18
     end
@@ -1234,8 +1512,63 @@ local function drawMicStrip()
     micwave.drawWave(wx, wy, ww, wh)
 end
 
+local function drawTargetPill(target)
+    local font = fonts[14]
+    love.graphics.setFont(font)
+    local label = target.label
+    local lw = font:getWidth(label)
+    local tx = target.x + target.w - lw - 16
+    local ty = target.y + (target.h - font:getHeight()) / 2
+    drawRoundedBox(tx - 12, target.y + 8, lw + 24, target.h - 16, 8, "gold", 1)
+    color("ink")
+    love.graphics.print(label, tx, ty)
+    return lw + 36
+end
+
+local function drawServerRow()
+    local list = serverTargets()
+    local actionTarget, stopTarget
+    for i = 1, #list do
+        if list[i].id == "stop" then
+            stopTarget = list[i]
+        elseif list[i].id == "action" then
+            actionTarget = list[i]
+        end
+    end
+    local x, y, w, h = 12, 8, 616, 48
+    drawRoundedBox(x, y, w, h, 12, "ink", 0.9)
+    local wordColor = "gold"
+    if serverRow.state == "failed" or serverRow.state == "auth" then
+        wordColor = "pink"
+    elseif serverRow.state == "running" then
+        wordColor = "mint"
+    end
+    color(wordColor)
+    love.graphics.setFont(fonts[14])
+    love.graphics.print(serverRow.word or "", x + 14, y + 6)
+    local reserve = 0
+    if stopTarget then
+        drawTargetPill(stopTarget)
+        reserve = stopTarget.w
+    end
+    if actionTarget then
+        reserve = reserve + drawTargetPill(actionTarget)
+    end
+    local detail = serverRow.detail or ""
+    local font = fonts[11]
+    love.graphics.setFont(font)
+    local limit = math.max(40, w - 28 - reserve)
+    if serverRow.log and font:getWidth(detail .. "  " .. serverRow.log) <= limit then
+        detail = detail .. "  " .. serverRow.log
+    end
+    color("cream", 0.9)
+    local _, lines = font:getWrap(detail, limit)
+    love.graphics.print(lines[1] or "", x + 14, y + 26)
+end
+
 local function drawInfoScreen()
     drawSky()
+    drawServerRow()
     if aid.hasLog() then
         drawChatLog()
         drawMicStrip()
@@ -1245,24 +1578,6 @@ local function drawInfoScreen()
         drawMicPanel()
     end
     drawHint()
-    drawFingerMark()
-end
-
-function drawFingerMark()
-    touchpoll.pump()
-    if not finger then return end
-    local x, y = finger.x, finger.y
-    color(finger.down and "gold" or "mint")
-    love.graphics.setLineWidth(4)
-    love.graphics.circle("line", x, y, 36)
-    love.graphics.line(x - 56, y, x + 56, y)
-    love.graphics.line(x, y - 56, x, y + 56)
-    love.graphics.setLineWidth(1)
-    color("pink")
-    love.graphics.circle("fill", x, y, 10)
-    color("cream")
-    love.graphics.setFont(fonts[16])
-    love.graphics.print(string.format("TOUCH  %.0f, %.0f", x, y), math.min(x + 20, W - 160), math.min(y + 20, H - 28))
 end
 
 function love.draw()
@@ -1324,6 +1639,7 @@ function drawSelftest()
     add("mic", string.format("%s (%s), rms %.0f dBFS", micwave.state, tostring(micwave.detail), micwave.rmsDb))
     add("stt", stt.phase .. (stt.detail ~= "" and (" (" .. stt.detail .. ")") or ""))
     add("aid", aid.phase .. (aid.detail ~= "" and (" (" .. aid.detail .. ")") or ""))
+    add("server", (serverRow.word or "") .. (serverRow.action and (" · " .. serverRow.action) or ""))
     add("subscreen", hud.external and string.format("second window on display %d, %d frames", subscreen.display, subscreen.frames)
         or ("off: " .. tostring(hud.error)))
     add("mem KB", string.format("%.0f", collectgarbage("count")))
