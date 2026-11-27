@@ -44,8 +44,13 @@ local function writeFile(path, data)
     f:close()
 end
 
+local function cmdOk(cmd)
+    local status = os.execute(cmd)
+    return status == true or status == 0
+end
+
 local function mkdir(path)
-    assert(os.execute("mkdir -p " .. shquote(path)) == 0, "mkdir " .. path)
+    assert(cmdOk("mkdir -p " .. shquote(path)), "mkdir " .. path)
 end
 
 local function u16le(n)
@@ -246,7 +251,7 @@ local function main()
     local realLove = tmp .. "/real"
     mkdir(realLove)
     writeFile(realLove .. "/main.lua", "print(1)\n")
-    assert(os.execute("cd " .. shquote(realLove) .. " && zip -q " .. shquote(tmp .. "/zipcli.love") .. " main.lua") == 0, "zip")
+    assert(cmdOk("cd " .. shquote(realLove) .. " && zip -q " .. shquote(tmp .. "/zipcli.love") .. " main.lua"), "zip")
     check("zip tool archive with root main.lua", tag(tmp .. "/zipcli.love"), "LÖVE")
 
     writeFile(tmp .. "/bor.pak", "pak")
@@ -314,8 +319,16 @@ local function main()
             "install OpenBOR (" .. tmp .. "/missing-engine)")
     end)
     writeFile(tmp .. "/stand-in", "")
+    assert(cmdOk("chmod 644 " .. shquote(tmp .. "/stand-in")), "chmod 644")
     withBinary(pakEntry, tmp .. "/stand-in", function()
-        check("file binary is startable", engines.startable(pakEntry), true)
+        check("non-executable file is not startable", engines.startable(pakEntry), false)
+        check("non-executable binary keeps the label", pakEntry.label, "OpenBOR")
+        check("non-executable binary kind line", engines.kindLine(pakEntry),
+            "install OpenBOR (" .. tmp .. "/stand-in)")
+    end)
+    assert(cmdOk("chmod +x " .. shquote(tmp .. "/stand-in")), "chmod +x")
+    withBinary(pakEntry, tmp .. "/stand-in", function()
+        check("executable binary is startable", engines.startable(pakEntry), true)
         check("present binary kind line is the label", engines.kindLine(pakEntry), "OpenBOR")
     end)
     mkdir(tmp .. "/binary-dir")

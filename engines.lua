@@ -17,6 +17,13 @@
 local M = {}
 
 local function moduleDir()
+    if love and love.filesystem and love.filesystem.getSource then
+        local ok, source = pcall(love.filesystem.getSource)
+        if ok and type(source) == "string" and source ~= "" then
+            local stripped = source:gsub("/+$", "")
+            return stripped ~= "" and stripped or "/"
+        end
+    end
     local src = debug.getinfo(1, "S").source
     if src:sub(1, 1) == "@" then
         src = src:sub(2)
@@ -48,6 +55,11 @@ end
 
 local function shquote(s)
     return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
+local function cmdOk(cmd)
+    local status = os.execute(cmd)
+    return status == true or status == 0
 end
 
 local function clean(path)
@@ -91,7 +103,7 @@ local function kindOf(path)
 end
 
 local function listNames(path)
-    local pipe = io.popen("ls -1A " .. shquote(path), "r")
+    local pipe = io.popen("ls -1A -- " .. shquote(path) .. " 2>/dev/null", "r")
     if not pipe then
         return {}
     end
@@ -177,30 +189,40 @@ local function zipRootHas(path, want)
     if not f:seek("set", cdOff) then
         return finish(false)
     end
-    local cd = f:read(cdSize)
-    if not cd or #cd ~= cdSize then
-        return finish(false)
-    end
 
-    local at = 1
-    while at + 45 <= #cd do
-        if cd:sub(at, at + 3) ~= "PK\001\002" then
+    local consumed = 0
+    while consumed + 46 <= cdSize do
+        local header = f:read(46)
+        if not header or #header ~= 46 or header:sub(1, 4) ~= "PK\001\002" then
             return finish(false)
         end
-        local nameLen = u16(cd, at + 28)
-        local extraLen = u16(cd, at + 30)
-        local commentLen = u16(cd, at + 32)
+        local nameLen = u16(header, 29)
+        local extraLen = u16(header, 31)
+        local commentLen = u16(header, 33)
         if not nameLen or not extraLen or not commentLen then
             return finish(false)
         end
-        local nextAt = at + 46 + nameLen + extraLen + commentLen
-        if nextAt < at + 46 or nextAt - 1 > #cd then
+        local entrySize = 46 + nameLen + extraLen + commentLen
+        if entrySize < 46 or consumed + entrySize > cdSize then
             return finish(false)
         end
-        if nameLen == #want and cd:sub(at + 46, at + 45 + nameLen) == want then
-            return finish(true)
+        if nameLen == #want then
+            local name = f:read(nameLen)
+            if not name or #name ~= nameLen then
+                return finish(false)
+            end
+            if name == want then
+                return finish(true)
+            end
+            if extraLen + commentLen > 0 and not f:seek("cur", extraLen + commentLen) then
+                return finish(false)
+            end
+        elseif nameLen + extraLen + commentLen > 0 then
+            if not f:seek("cur", nameLen + extraLen + commentLen) then
+                return finish(false)
+            end
         end
-        at = nextAt
+        consumed = consumed + entrySize
     end
     return finish(false)
 end
@@ -307,7 +329,8 @@ end
 function M.startable(engine)
     return type(engine) == "table"
         and type(engine.binary) == "string"
-        and kindOf(engine.binary) == "file"
+        and engine.binary ~= ""
+        and cmdOk("test -f " .. shquote(engine.binary) .. " -a -x " .. shquote(engine.binary))
 end
 
 function M.installHint(engine)
