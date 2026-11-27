@@ -4,7 +4,7 @@
 local src = debug.getinfo(1, "S").source
 if src:sub(1, 1) == "@" then src = src:sub(2) end
 local dir = src:match("^(.*)/[^/]+$") or "."
-local root = dir:match("^(.*)/tests$") or (dir == "tests" and "." or dir)
+local root = dir:match("^(.*)/tests$") or (dir == "tests" and "." or (dir == "." and ".." or dir))
 package.path = root .. "/?.lua;" .. package.path
 
 local finder = require("finder")
@@ -156,8 +156,9 @@ local function main()
     check(finder.readWorkdir(files .. "/secret") == finder.DEFAULT_WORKDIR, "unreadable file")
     assert(ran("chmod 644 " .. shQuote(files .. "/secret")))
 
+    local luaBin = (arg and arg[-1]) or "lua5.1"
     local function spawn(env, ...)
-        local cmd = env .. " lua5.1 " .. shQuote(src)
+        local cmd = env .. " " .. shQuote(luaBin) .. " " .. shQuote(src)
         for i = 1, select("#", ...) do
             cmd = cmd .. " " .. shQuote(select(i, ...))
         end
@@ -583,6 +584,33 @@ local function main()
     local copiedRow = rowNamed(copied, "a.love")
     check(copiedRow.tag == "LÖVE" and copiedRow.startable, "the list copies the engine record")
     check(copiedRow.engine ~= shared, "the copy is a different table")
+
+    local nlRoot = tmp()
+    writeFile(nlRoot .. "/Spring\nFestival", "x")
+    writeFile(nlRoot .. "/normal.txt", "y")
+    local nlState = finder.open({ root = nlRoot })
+    check(names(nlState) == "file:normal.txt",
+        "newline filename is skipped without phantom rows, got " .. names(nlState))
+
+    local recheckRoot = tmp()
+    local recheckApp = recheckRoot .. "/RGDS-Agents"
+    mkdir(recheckApp)
+    writeFile(recheckApp .. "/main.lua", "print('app')\n")
+    mkdir(recheckRoot .. "/MoveMe")
+    writeFile(recheckRoot .. "/MoveMe/main.lua", "print('game')\n")
+    local recheck = finder.open({
+        root = recheckRoot,
+        appDir = recheckApp,
+        engineOf = engineOf,
+    })
+    check(selectName(recheck, "MoveMe") ~= nil, "select MoveMe")
+    ran("rm -rf " .. shQuote(recheckRoot .. "/MoveMe"))
+    check(finder.confirm(recheck).op == "none", "confirm rejects a removed game")
+    link(recheckApp, recheckRoot .. "/MoveMe")
+    check(finder.confirm(recheck).op == "none", "confirm rejects a game redirected to appDir")
+    ran("rm -f " .. shQuote(recheckRoot .. "/MoveMe"))
+    link("/etc", recheckRoot .. "/MoveMe")
+    check(finder.confirm(recheck).op == "none", "confirm rejects a game redirected outside root")
 end
 
 local ok, err = pcall(main)
