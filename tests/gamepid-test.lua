@@ -106,7 +106,8 @@ check(type(selfPid) == "number" and gamepid.alive(selfPid), "this process is ali
 local tagged = spawnTagged("love")
 check(type(tagged) == "number", "spawned a tagged game")
 local livePath = tmp .. "/live.pid"
-local liveGame = "/work/demo.love"
+local liveGame = tmp .. "/demo.love"
+writeFile(liveGame, "demo\n")
 local live
 if tagged then
     writeFile(livePath, tagged .. "\nlove\n" .. liveGame .. "\n")
@@ -178,6 +179,95 @@ check(openEffect == "open" and opened.phase == "failed" and opened.game == nil,
 local left, leftEffect = gamepid.observe(state, nil)
 check(leftEffect == "open" and left.phase == "finder" and left.game == nil,
     "a missing pid file reopens the finder")
+
+check(gamepid.press("running", "button", 6, state.game.voice) == "voice",
+    "default running game accepts R1")
+check(gamepid.press("running", "button", 11, state.game.voice) == nil,
+    "default running game ignores L2")
+check(gamepid.press("running", "key", "t", state.game.voice) == "voice",
+    "default running game accepts key t")
+
+local l2Dir = tmp .. "/l2-game"
+os.execute("mkdir -p " .. shQuote(l2Dir))
+writeFile(l2Dir .. "/rgds-voice", "11\n")
+local l2State, l2Effect = gamepid.observe(gamepid.blank(), {
+    pid = 4001, id = "love", path = l2Dir, alive = true,
+})
+check(l2Effect == "close" and l2State.phase == "running", "remapped game enters running")
+check(gamepid.runningHint(l2State) == loveLabel .. "  ·  l2-game  ·  HOLD L2 TALK",
+    "remapped game hint shows L2")
+check(gamepid.press("running", "button", 11, l2State.game.voice) == "voice",
+    "remapped game accepts L2")
+check(gamepid.press("running", "button", 6, l2State.game.voice) == nil,
+    "remapped game frees R1")
+check(gamepid.press("running", "key", "t", l2State.game.voice) == "voice",
+    "remapped game keeps key t")
+check(gamepid.press("finder", "button", 6, l2State.game.voice) == "voice",
+    "finder ignores per-game voice override for R1")
+check(gamepid.press("finder", "button", 11, l2State.game.voice) == nil,
+    "finder ignores per-game voice override for L2")
+
+local quietLove = tmp .. "/quiet.love"
+writeFile(quietLove, "zip\n")
+writeFile(quietLove .. ".rgds-voice", "none\n")
+local quietState = gamepid.observe(gamepid.blank(), {
+    pid = 4002, id = "love", path = quietLove, alive = true,
+})
+check(gamepid.runningHint(quietState) == loveLabel .. "  ·  quiet.love  ·  VOICE OFF",
+    "none mapping hint shows VOICE OFF")
+check(gamepid.press("running", "button", 6, quietState.game.voice) == nil,
+    "none mapping disables R1")
+check(gamepid.press("running", "button", 11, quietState.game.voice) == nil,
+    "none mapping disables other buttons")
+check(gamepid.press("running", "key", "t", quietState.game.voice) == nil,
+    "none mapping disables key t")
+
+local badDir = tmp .. "/bad-voice"
+os.execute("mkdir -p " .. shQuote(badDir))
+writeFile(badDir .. "/rgds-voice", "9\n")
+local badState = gamepid.observe(gamepid.blank(), {
+    pid = 4003, id = "love", path = badDir, alive = true,
+})
+check(gamepid.runningHint(badState) == loveLabel .. "  ·  bad-voice  ·  VOICE FILE BAD",
+    "invalid rgds-voice hint shows VOICE FILE BAD")
+check(gamepid.press("running", "button", 6, badState.game.voice) == nil,
+    "invalid rgds-voice disables R1")
+check(gamepid.press("running", "button", 9, badState.game.voice) == nil,
+    "invalid rgds-voice disables unknown button")
+check(gamepid.press("running", "key", "t", badState.game.voice) == nil,
+    "invalid rgds-voice disables key t")
+
+local resolveCalls = 0
+local function countingResolver(path)
+    resolveCalls = resolveCalls + 1
+    return {button = 11, off = false, name = "L2", source = "file", path = path}
+end
+local cached1 = gamepid.observe(gamepid.blank(), {
+    pid = 5001, id = "love", path = l2Dir, alive = true,
+}, countingResolver)
+check(resolveCalls == 1, "resolver runs on first observe")
+local cached2 = gamepid.observe(cached1, {
+    pid = 5001, id = "love", path = l2Dir, alive = true,
+}, countingResolver)
+check(resolveCalls == 1 and cached2.game.voice == cached1.game.voice,
+    "same pid and path reuses cached voice")
+local cached3 = gamepid.observe(cached2, {
+    pid = 5002, id = "love", path = l2Dir, alive = true,
+}, countingResolver)
+check(resolveCalls == 2, "new pid re-resolves voice")
+local cached4 = gamepid.observe(cached3, {
+    pid = 5002, id = "love", path = badDir, alive = true,
+}, countingResolver)
+check(resolveCalls == 3, "new path re-resolves voice")
+
+local exited, exitEffect = gamepid.observe(l2State, nil)
+check(exitEffect == "open" and exited.phase == "finder" and exited.game == nil,
+    "exiting remapped game clears game state")
+check(gamepid.runningHint(exited) == nil, "exited game has no running hint")
+check(gamepid.press("finder", "button", 6, exited.game and exited.game.voice) == "voice",
+    "exiting remapped game restores R1")
+check(gamepid.press("finder", "button", 11, exited.game and exited.game.voice) == nil,
+    "exiting remapped game stops listening on L2")
 
 local secret = "pw-sample-not-real"
 local long = string.rep("x", 200)
