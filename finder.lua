@@ -23,6 +23,8 @@
 -- 目录的 names 是该层的名字，按字节序排，文件的 names 是 nil。
 -- 返回 nil，或一张表 {id, label, startable, hint, start, ...}。
 -- startable 省略时当作 true。startable 为 false 时 kind 行用 hint（没有 hint 就用 label）。
+-- 接线用 engines.forFinder。engines.match 只认 kind "directory"，也不带 startable 和 hint。
+-- 把 match 直接当 engineOf 时，缺 binary 的 .pak 会被当成能启动。
 -- 本应用目录即使 engineOf 返回了引擎，也只当作普通文件夹。
 
 local M = {}
@@ -125,18 +127,20 @@ local function classify(path)
 end
 
 -- One level, including names that point outside the work root.
--- A name that contains a newline is split by the line reader and not listed.
+-- A name that contains a newline is skipped so it cannot split into two rows.
 local function listTyped(dir)
-    local cmd = "cd -- " .. shQuote(dir)
-        .. " && find . ! -name . -prune -print | while IFS= read -r p; do"
-        .. " n=${p#./};"
+    local cmd = "nl='\n'; if cd -- " .. shQuote(dir)
+        .. " 2>/dev/null && ls -1A -- . >/dev/null 2>&1; then"
+        .. " for n in * .[!.]* ..?*; do"
+        .. " [ -e \"$n\" ] || [ -L \"$n\" ] || continue;"
+        .. " case \"$n\" in *\"$nl\"*) continue ;; esac;"
         .. " if [ -d \"$n\" ]; then printf 'd\\t%s\\n' \"$n\";"
         .. " else printf 'f\\t%s\\n' \"$n\"; fi;"
-        .. " done"
+        .. " done; printf 'rc=0\\n'; else printf 'rc=1\\n'; fi"
     local lines = captureLines(cmd)
-    if not lines then return nil end
+    if not lines or #lines == 0 or lines[#lines] ~= "rc=0" then return nil end
     local entries = {}
-    for i = 1, #lines do
+    for i = 1, #lines - 1 do
         local flag, name = lines[i]:match("^([df])\t(.*)$")
         if flag and name and name ~= "" and name ~= "." and name ~= ".." then
             local path = dir == "/" and ("/" .. name) or (dir .. "/" .. name)
@@ -199,15 +203,14 @@ local function place(state, index)
     end
 end
 
-local function rowFor(state, entry)
+local function rowFor(state, entry, real)
     local names = nil
     if entry.kind == "dir" then names = childNames(entry.path) end
+    local rowReal = real or entry.path
     local engine = nil
-    if state.engineOf then
+    if rowReal ~= state.appDir and state.engineOf then
         engine = copyEngine(state.engineOf(entry.path, entry.kind, names))
     end
-    local rowReal = realpath(entry.path) or entry.path
-    if rowReal == state.appDir then engine = nil end
     local game = engine ~= nil
     local empty = entry.kind == "dir" and names ~= nil and #names == 0
     return {
@@ -246,6 +249,7 @@ local function readList(state, keepName, keepScroll)
         local entry = entries[i]
         local real = realpath(entry.path)
         if not real or inside(state.rootReal, real) then
+            entry.real = real
             if entry.kind == "dir" then
                 dirs[#dirs + 1] = entry
             else
@@ -270,10 +274,10 @@ local function readList(state, keepName, keepScroll)
         }
     end
     for i = 1, #dirs do
-        state.rows[#state.rows + 1] = rowFor(state, dirs[i])
+        state.rows[#state.rows + 1] = rowFor(state, dirs[i], dirs[i].real)
     end
     for i = 1, #files do
-        state.rows[#state.rows + 1] = rowFor(state, files[i])
+        state.rows[#state.rows + 1] = rowFor(state, files[i], files[i].real)
     end
     state.scroll = keepScroll or 1
     if keepName then
@@ -427,10 +431,21 @@ function M.confirm(state)
     if not row then return none() end
     if row.kind == "up" then return M.back(state) end
     if row.game then
-        if row.startable then
-            return { op = "start", path = row.path, engine = row.engine }
+        if not row.startable then return none() end
+        local real = realpath(row.path)
+        if not real or not inside(state.rootReal, real) or real == state.appDir then
+            return none()
         end
-        return none()
+        local currentKind = classify(row.path)
+        if row.kind == "dir" and currentKind ~= "dir" then return none() end
+        if row.kind == "file" and currentKind ~= "not a directory" then return none() end
+        local engine = row.engine
+        if state.engineOf then
+            local names = row.kind == "dir" and childNames(row.path) or nil
+            engine = copyEngine(state.engineOf(row.path, row.kind, names))
+            if not engine or not engine.startable then return none() end
+        end
+        return { op = "start", path = row.path, engine = engine }
     end
     if row.kind == "dir" then return enterName(state, row.name) end
     return none()

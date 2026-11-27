@@ -76,8 +76,8 @@ end
 local function lastLine(text)
     local last = ""
     if type(text) ~= "string" then return last end
-    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-        line = trimCr(line) or ""
+    for raw in (text .. "\n"):gmatch("([^\n]*)\n") do
+        local line = trimCr(raw) or ""
         if line ~= "" then last = line end
     end
     return last

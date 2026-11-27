@@ -225,6 +225,9 @@ end
 local function fail(detail)
     M.phase, M.detail = "error", detail
     bump()
+    if M.onEvent then
+        M.onEvent({ev = "error", kind = "helper", msg = detail})
+    end
     print("aid: " .. detail)
     io.stdout:flush()
     return false
@@ -327,11 +330,18 @@ local function finishIdle()
     takePending()
 end
 
+function M.askStatus()
+    if not jobChannel or not thread or not thread:isRunning() then return false end
+    jobChannel:push({op = "status"})
+    return true
+end
+
 function M.update()
     refreshSetup()
     if evChannel then
         local msg = evChannel:pop()
         while msg do
+            if M.onEvent then M.onEvent(msg) end
             local mine = msg.id == nil or msg.id == M.reqId
             if msg.ev == "ready" then
                 if M.phase == "loading" then
@@ -406,8 +416,9 @@ function M.update()
             msg = evChannel:pop()
         end
     end
-    if thread and M.phase ~= "off" and M.phase ~= "error" and not thread:isRunning() then
+    if thread and M.phase ~= "off" and not thread:isRunning() then
         local err = thread:getError()
+        thread = nil
         local turn = M.log[#M.log]
         if turn and turn.who == "ai" then
             if turn.tool and turn.tool.status == "running" then
@@ -420,6 +431,9 @@ function M.update()
         M.detail = "AI helper off"
         M.reqId = nil
         bump()
+        if M.onEvent then
+            M.onEvent({ev = "error", kind = "helper", msg = "AI helper off"})
+        end
         if err then
             print("aid: thread " .. (tostring(err):match("^[^\n]+") or "error"))
             io.stdout:flush()
