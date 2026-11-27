@@ -61,7 +61,8 @@ same(restart[1], "action", "restart", "RESTART", ROW_X, ROW_Y, ROW_W, ROW_H)
 local wizard = targets.layout({action = "wizard"})
 same(wizard[1], "action", "wizard", "WIZARD", ROW_X, ROW_Y, ROW_W, ROW_H)
 
-for _, action in ipairs({nil, "", "browse", "stop"}) do
+check(#targets.layout({action = nil}) == 0, "no action target for nil")
+for _, action in ipairs({"", "browse", "stop"}) do
     local list = targets.layout({action = action})
     check(#list == 0, "no action target for " .. tostring(action) .. ", got " .. ids(list))
 end

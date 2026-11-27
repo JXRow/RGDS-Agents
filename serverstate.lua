@@ -86,8 +86,8 @@ function M.parseProbe(text)
     if type(text) ~= "string" then return nil, nil end
     local exitCode = nil
     local last = nil
-    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-        line = line:gsub("\r$", "")
+    for raw in (text .. "\n"):gmatch("([^\n]*)\n") do
+        local line = raw:gsub("\r$", "")
         local rc = line:match("^ rc=(%d+)%s*$")
         if rc then
             exitCode = tonumber(rc)
@@ -122,14 +122,77 @@ function M.parseSetup(text)
     return {url = url, token = token}
 end
 
--- First JSON string stored under the key "model". Blank is missing.
+local function scanJsonString(text, pos)
+    if text:sub(pos, pos) ~= '"' then return nil, pos end
+    local out = {}
+    local i = pos + 1
+    local n = #text
+    while i <= n do
+        local c = text:sub(i, i)
+        if c == '"' then
+            return table.concat(out), i + 1
+        elseif c == "\\" then
+            i = i + 1
+            if i > n then return nil, i end
+            local esc = text:sub(i, i)
+            if esc == '"' or esc == "\\" or esc == "/" then
+                out[#out + 1] = esc
+            elseif esc == "n" then out[#out + 1] = "\n"
+            elseif esc == "r" then out[#out + 1] = "\r"
+            elseif esc == "t" then out[#out + 1] = "\t"
+            elseif esc == "b" then out[#out + 1] = "\b"
+            elseif esc == "f" then out[#out + 1] = "\f"
+            else out[#out + 1] = esc
+            end
+        else
+            out[#out + 1] = c
+        end
+        i = i + 1
+    end
+    return nil, i
+end
+
+local function skipSpaces(text, pos)
+    local _, e = text:find("^[ \t\r\n]*", pos)
+    return (e or (pos - 1)) + 1
+end
+
+-- Top-level JSON string stored under the key "model". Blank is missing.
 function M.readModel(text)
     if type(text) ~= "string" then return nil end
-    local model = text:match('"model"%s*:%s*"([^"]*)"')
-    if type(model) ~= "string" then return nil end
-    model = trim(model)
-    if model == "" then return nil end
-    return model
+    local i = skipSpaces(text, 1)
+    local n = #text
+    local targetDepth = text:sub(i, i) == "{" and 1 or 0
+    local depth = 0
+    while i <= n do
+        local c = text:sub(i, i)
+        if c == "{" or c == "[" then
+            depth = depth + 1
+            i = i + 1
+        elseif c == "}" or c == "]" then
+            depth = depth - 1
+            if targetDepth == 1 and depth <= 0 then break end
+            i = i + 1
+        elseif c == '"' then
+            local str, nextI = scanJsonString(text, i)
+            if not str then return nil end
+            i = skipSpaces(text, nextI)
+            if depth == targetDepth and text:sub(i, i) == ":" then
+                i = skipSpaces(text, i + 1)
+                if str == "model" then
+                    if text:sub(i, i) ~= '"' then return nil end
+                    local val = scanJsonString(text, i)
+                    if type(val) ~= "string" then return nil end
+                    val = trim(val)
+                    if val == "" then return nil end
+                    return val
+                end
+            end
+        else
+            i = i + 1
+        end
+    end
+    return nil
 end
 
 -- "opencode password missing", or "HTTP 401" / "HTTP 403" from the local
@@ -242,7 +305,12 @@ function M.map(src)
         local cause = M.authCause(errorEv.msg)
         local detail = errorEv.msg
         if type(detail) ~= "string" or detail == "" then detail = "auth" end
-        local action = cause == "password" and "restart" or "wizard"
+        local action
+        if cause == "password" then
+            action = "restart"
+        elseif not setup then
+            action = "wizard"
+        end
         return result("auth", detail, action, {
             setup = setup,
             authCause = cause,
