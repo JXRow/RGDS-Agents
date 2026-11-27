@@ -67,7 +67,7 @@ if block then
     check("block maps", block:find("serverstate.map", 1, true) ~= nil)
     check("block steps", block:find("targets.step", 1, true) ~= nil)
     for _, field in ipairs({
-        "configPath", "setupPath", "statusLine", "statusExit", "adapter",
+        "configFile", "setupFile", "statusLine", "statusExit", "adapter",
         "lastStatus", "startPending", "startExit", "startLine", "unhealthySeconds",
     }) do
         check("map " .. field, block:find(field, 1, true) ~= nil)
@@ -143,7 +143,7 @@ check("probe records rc", probe:find('echo " rc=$?"', 1, true) ~= nil)
 local startCmd = serverstate.actionCommand("start", "/app/opencode/opencode-service.sh")
 check("start command", startCmd:find(" start 2>&1", 1, true) ~= nil)
 local wizardCmd = serverstate.actionCommand("wizard", nil, "/app/opencode/opencode-setup-web.py")
-check("wizard command", wizardCmd == "'/app/opencode/opencode-setup-web.py'", wizardCmd)
+check("wizard command", wizardCmd == "/usr/bin/python3 '/app/opencode/opencode-setup-web.py'", wizardCmd)
 
 -- Behavioral check of main.lua wiring with stubbed LÖVE modules.
 do

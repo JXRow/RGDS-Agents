@@ -347,7 +347,7 @@ end
 -- === OpenCode server 行 ===
 -- 状态脚本在 love.thread 里跑，跟上面的网络探测一样。不看 file:close() 的返回值。
 -- 每帧 serverstate.map 出一行。手指只走 touchpoll，抬起在目标内才触发。
--- game 保持 false：STOP GAME 留给第 7 步。
+-- game 保持 false：STOP GAME 留给第 7 步。drawServerRow 会画 layout 里的每一个目标。
 local SERVER_CHANNEL = "rgds-server"
 local SHELL_THREAD = [[
 require("love.thread")
@@ -420,8 +420,33 @@ end
 
 aid.onEvent = noteAdapter
 
+-- config 和 setup 不每帧打开。状态脚本和 adapter 事件仍每帧进 map。
+local SERVER_FILE_S = 0.5
+local serverFilesAt = -1
+local serverFilesDirty = true
+local serverConfigText = nil
+local serverSetupText = nil
+
+local function slurpServerFile(path)
+    local handle = io.open(path, "r")
+    if not handle then return nil end
+    local text = handle:read("*a")
+    handle:close()
+    return text or ""
+end
+
+local function readServerFiles()
+    serverConfigText = slurpServerFile(serverstate.paths.configFile)
+    serverSetupText = slurpServerFile(serverstate.paths.setupFile)
+    serverFilesAt = love.timer.getTime()
+    serverFilesDirty = false
+end
+
 local function refreshServerRow()
     local now = love.timer.getTime()
+    if serverFilesDirty or serverFilesAt < 0 or now - serverFilesAt >= SERVER_FILE_S then
+        readServerFiles()
+    end
     local parsed = serverstate.parseStatus(serverStatusLine)
     local unhealthy = nil
     if parsed and parsed.health == "unhealthy" then
@@ -430,9 +455,7 @@ local function refreshServerRow()
     else
         unhealthySince = nil
     end
-    serverRow = serverstate.map({
-        configPath = serverstate.paths.configFile,
-        setupPath = serverstate.paths.setupFile,
+    local src = {
         statusLine = serverStatusLine,
         statusExit = serverStatusExit,
         adapter = serverAdapter,
@@ -442,7 +465,16 @@ local function refreshServerRow()
         startExit = serverStartExit,
         startLine = serverStartLine,
         unhealthySeconds = unhealthy,
-    })
+    }
+    if serverConfigText == nil then
+        src.model = false
+    else
+        src.configText = serverConfigText
+    end
+    if serverSetupText ~= nil then
+        src.setupText = serverSetupText
+    end
+    serverRow = serverstate.map(src)
 end
 
 local function serverTargets()
@@ -450,6 +482,7 @@ local function serverTargets()
 end
 
 local function reapWizards()
+    local before = #wizardThreads
     local live = {}
     for i = 1, #wizardThreads do
         local thread = wizardThreads[i]
@@ -458,6 +491,9 @@ local function reapWizards()
         if running then live[#live + 1] = thread end
     end
     wizardThreads = live
+    if #live < before then
+        serverFilesDirty = true
+    end
 end
 
 local function spawnWizard()
@@ -541,6 +577,7 @@ local function finishShell(out)
         queuedAction = nil
         launchAction(op)
     end
+    serverFilesDirty = true
 end
 
 local function takeShell()
@@ -1027,6 +1064,7 @@ function love.update(dt)
     stt.update()
     aid.update()
     takeShell()
+    reapWizards()
     refreshServerRow()
     maybeProbe()
     if stt.serial ~= aidSeen and not serverRow.holdChat then
@@ -1474,8 +1512,29 @@ local function drawMicStrip()
     micwave.drawWave(wx, wy, ww, wh)
 end
 
+local function drawTargetPill(target)
+    local font = fonts[14]
+    love.graphics.setFont(font)
+    local label = target.label
+    local lw = font:getWidth(label)
+    local tx = target.x + target.w - lw - 16
+    local ty = target.y + (target.h - font:getHeight()) / 2
+    drawRoundedBox(tx - 12, target.y + 8, lw + 24, target.h - 16, 8, "gold", 1)
+    color("ink")
+    love.graphics.print(label, tx, ty)
+    return lw + 36
+end
+
 local function drawServerRow()
-    local button = serverTargets()[1]
+    local list = serverTargets()
+    local actionTarget, stopTarget
+    for i = 1, #list do
+        if list[i].id == "stop" then
+            stopTarget = list[i]
+        elseif list[i].id == "action" then
+            actionTarget = list[i]
+        end
+    end
     local x, y, w, h = 12, 8, 616, 48
     drawRoundedBox(x, y, w, h, 12, "ink", 0.9)
     local wordColor = "gold"
@@ -1488,17 +1547,12 @@ local function drawServerRow()
     love.graphics.setFont(fonts[14])
     love.graphics.print(serverRow.word or "", x + 14, y + 6)
     local reserve = 0
-    if button then
-        local font = fonts[14]
-        love.graphics.setFont(font)
-        local label = button.label
-        local lw = font:getWidth(label)
-        reserve = lw + 36
-        local tx = button.x + button.w - lw - 16
-        local ty = button.y + (button.h - font:getHeight()) / 2
-        drawRoundedBox(tx - 12, button.y + 8, lw + 24, button.h - 16, 8, "gold", 1)
-        color("ink")
-        love.graphics.print(label, tx, ty)
+    if stopTarget then
+        drawTargetPill(stopTarget)
+        reserve = stopTarget.w
+    end
+    if actionTarget then
+        reserve = reserve + drawTargetPill(actionTarget)
     end
     local detail = serverRow.detail or ""
     local font = fonts[11]
