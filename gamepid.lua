@@ -13,6 +13,7 @@
 
 local engines = require("engines")
 local targets = require("targets")
+local voicebutton = require("voicebutton")
 
 local M = {}
 
@@ -20,9 +21,13 @@ M.POLL = 0.25
 M.PID_FILE = "/tmp/rgds-game.pid"
 M.NOTICE_LIMIT = 180
 M.PASSWORD_FILE = "/userdata/opencode/server.password"
-M.VOICE_BUTTON = 6
+M.VOICE_BUTTON = voicebutton.DEFAULT_BUTTON
 M.VOICE_KEY = "t"
-M.VOICE_HINT = "HOLD R1 TALK"
+M.VOICE_HINT = voicebutton.hint({
+    button = voicebutton.DEFAULT_BUTTON,
+    off = false,
+    name = voicebutton.NAMES[voicebutton.DEFAULT_BUTTON],
+})
 M.FINDER_HINT = "UP DOWN MOVE  ·  LEFT B BACK  ·  RIGHT A OPEN  ·  A START  ·  R1 TALK"
 M.FAIL_LINE = "game failed"
 
@@ -207,10 +212,21 @@ local function gameName(path)
     return path:match("([^/]+)$") or path
 end
 
-function M.observe(state, reading)
+function M.observe(state, reading, resolveVoice)
     state = type(state) == "table" and state or M.blank()
     if type(reading) == "table" and reading.alive == true then
         local effect = state.phase ~= "running" and "close" or nil
+        local voice
+        if state.phase == "running"
+            and type(state.game) == "table"
+            and state.game.pid == reading.pid
+            and state.game.path == reading.path
+            and state.game.voice ~= nil
+        then
+            voice = state.game.voice
+        else
+            voice = (resolveVoice or voicebutton.resolve)(reading.path)
+        end
         return {
             phase = "running",
             notice = nil,
@@ -220,6 +236,7 @@ function M.observe(state, reading)
                 path = reading.path,
                 name = gameName(reading.path),
                 label = labelFor(reading.id),
+                voice = voice,
             },
         }, effect
     end
@@ -239,14 +256,26 @@ end
 function M.runningHint(state)
     local game = type(state) == "table" and state.game or nil
     if type(game) ~= "table" then return nil end
-    return (game.label or "") .. "  ·  " .. (game.name or "") .. "  ·  " .. M.VOICE_HINT
+    local voiceHint = type(game.voice) == "table" and voicebutton.hint(game.voice) or M.VOICE_HINT
+    return (game.label or "") .. "  ·  " .. (game.name or "") .. "  ·  " .. voiceHint
 end
 
-function M.press(phase, source, value)
+function M.press(phase, source, value, voice)
+    if phase == "running" then
+        if voice == nil then
+            if source == "button" and value == M.VOICE_BUTTON then return "voice" end
+            if source == "key" and value == M.VOICE_KEY then return "voice" end
+            return nil
+        end
+        if voicebutton.listens(voice) then
+            if source == "button" and value == voice.button then return "voice" end
+            if source == "key" and value == M.VOICE_KEY then return "voice" end
+        end
+        return nil
+    end
     if source == "button" and value == M.VOICE_BUTTON then return "voice" end
     if source == "key" and value == M.VOICE_KEY then return "voice" end
     if phase ~= "finder" and phase ~= "failed" then
-        if phase == "running" then return nil end
         if source == "button" and value == 2 then return "net" end
         if source == "button" and value == 7 then return "quit" end
         return nil
