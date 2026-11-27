@@ -689,6 +689,30 @@ if [ "$(cat "$TMP/blank-tail.out")" != "real error line" ]; then
 fi
 ok "trailing blank line log"
 
+# During RGDS_GAME_START_DELAY (before exec of the engine binary), the pidfile
+# process must already carry RGDS_GAME_ID in /proc/<pid>/environ so gamepid.read
+# closes the finder window before the engine opens.
+FAKE_OUT=$TMP/delay-marker.out
+rm -f "$FAKE_OUT"
+run env RGDS_GAME_START_DELAY=1 RGDS_GAME_START_WATCH=0.2 \
+  RGDS_LOVE_BIN="$TMP/fake-engine" RGDS_FAKE_OUT="$FAKE_OUT" RGDS_FAKE_MODE=run \
+  "$LOVE" "$WORK/my game"
+assert_code 0 "delayed launch start"
+delayed_pid=$LAST_OUT
+note "$delayed_pid"
+if [ -f "$FAKE_OUT" ]; then
+  fail "delayed launch exec'd before the delay elapsed"
+fi
+if ! { tr '\0' '\n' < "/proc/$delayed_pid/environ"; } 2>/dev/null | grep -F -x -q "RGDS_GAME_ID=love"; then
+  fail "RGDS_GAME_ID missing from /proc/<pid>/environ during RGDS_GAME_START_DELAY"
+fi
+run "$STOP"
+assert_code 0 "stop during delay"
+if alive "$delayed_pid"; then
+  fail "stop did not terminate delayed launch"
+fi
+ok "RGDS_GAME_ID visible during start delay"
+
 if [ -f /tmp/.next ]; then
   NEXT_AFTER=$(cksum /tmp/.next)
 else
