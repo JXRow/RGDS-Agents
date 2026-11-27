@@ -38,16 +38,29 @@ note() {
   printf '%s\n' "$1" >> "$PIDS"
 }
 
+cleanup_pid() {
+  _cp=$1
+  case ${_cp:-} in
+    ""|*[!0-9]*|0) return 0 ;;
+  esac
+  kill -0 "$_cp" 2>/dev/null || return 0
+  if { tr '\0' '\n' < "/proc/$_cp/environ"; } 2>/dev/null | grep -q '^RGDS_GAME_ID='; then
+    kill -KILL "$_cp" 2>/dev/null || true
+  fi
+}
+
 cleanup() {
   if [ -f "$PIDS" ]; then
     while IFS= read -r _p; do
-      kill -KILL "$_p" 2>/dev/null || true
+      cleanup_pid "$_p"
     done < "$PIDS"
   fi
   if [ "$CLEAN_DEFAULT" = 1 ]; then
     if [ -f /tmp/rgds-game.pid ]; then
       _p=$(sed -n '1p' /tmp/rgds-game.pid 2>/dev/null || true)
-      kill -KILL "$_p" 2>/dev/null || true
+      if grep -F -x -q "$_p" "$PIDS" 2>/dev/null; then
+        cleanup_pid "$_p"
+      fi
     fi
     rm -f /tmp/rgds-game.pid /tmp/rgds-game.log
     rm -rf /tmp/rgds-game.lock
@@ -341,6 +354,8 @@ if [ "$(cat "$RGDS_GAME_PID_FILE")" != "$saved" ]; then
 fi
 ok "missing binary"
 
+printf '%s\n' '#!/bin/sh' > "$TMP/not-executable"
+chmod 644 "$TMP/not-executable"
 run env RGDS_LOVE_BIN="$TMP/not-executable" "$LOVE" "$WORK/my game"
 assert_code 1 "non-executable binary"
 assert_err "engine binary is not executable: $TMP/not-executable" "non-executable text"
@@ -586,6 +601,57 @@ if grep -F -q "$SECRET" "$TMP/redact.out" || grep -F -q "$SECRET" "$TMP/redact.e
   fail "redaction helper printed the server password"
 fi
 ok "log line redaction"
+
+# Reject the controller's own directory even when workdir is that directory.
+printf '%s\n' "$REPO" > "$TMP/workdir-self"
+run env OPENCODE_WORKDIR_FILE="$TMP/workdir-self" RGDS_LOVE_BIN="$TMP/fake-engine" "$LOVE" "$REPO"
+assert_code 1 "controller directory rejected"
+assert_err "game path cannot be the controller directory: $REPO" "controller directory text"
+ok "controller directory rejected"
+
+# Reject a regular file as workdir.
+printf '%s\n' "$TMP/not-a-dir" > "$TMP/not-a-dir"
+printf '%s\n' "$TMP/not-a-dir" > "$TMP/workdir-file"
+run env OPENCODE_WORKDIR_FILE="$TMP/workdir-file" RGDS_LOVE_BIN="$TMP/fake-engine" "$LOVE" "$TMP/not-a-dir"
+assert_code 1 "regular file workdir rejected"
+ok "regular file workdir rejected"
+
+# Workdir '/' accepts ordinary descendants.
+printf '%s\n' "/" > "$TMP/workdir-root"
+run env OPENCODE_WORKDIR_FILE="$TMP/workdir-root" RGDS_LOVE_BIN="$TMP/fake-engine" RGDS_FAKE_OUT="$TMP/root.out" RGDS_FAKE_MODE=run "$LOVE" "$WORK/my game"
+assert_code 0 "root workdir start"
+note "$LAST_OUT"
+run "$STOP"
+ok "root workdir"
+
+# Failed pidfile publication terminates the launched engine and releases the lock.
+mkdir -p "$TMP/pid-as-dir"
+run env RGDS_GAME_PID_FILE="$TMP/pid-as-dir" RGDS_LOVE_BIN="$TMP/fake-engine" RGDS_FAKE_OUT="$TMP/badpid.out" RGDS_FAKE_MODE=run "$LOVE" "$WORK/my game"
+assert_code 1 "unwritable pidfile fails"
+if [ -e "$RGDS_GAME_LOCK_DIR" ]; then
+  fail "unwritable pidfile left lock directory"
+fi
+if [ -f "$TMP/badpid.out" ]; then
+  _leaked=$(sed -n 's/^pid=//p' "$TMP/badpid.out" 2>/dev/null || true)
+  if [ -n "$_leaked" ] && alive "$_leaked"; then
+    kill -KILL "$_leaked" 2>/dev/null || true
+    fail "unwritable pidfile left engine alive"
+  fi
+fi
+ok "unwritable pidfile cleanup"
+
+# Trailing blank lines in the engine log do not hide the last message.
+(
+  set +e
+  export RGDS_GAME_LOG="$TMP/blank-tail.log"
+  printf 'real error line\n\n   \n' > "$RGDS_GAME_LOG"
+  . "$REPO/engines/common.sh"
+  rgds_last_log_line > "$TMP/blank-tail.out"
+)
+if [ "$(cat "$TMP/blank-tail.out")" != "real error line" ]; then
+  fail "trailing blank lines hid last log line"
+fi
+ok "trailing blank line log"
 
 if [ -f /tmp/.next ]; then
   NEXT_AFTER=$(cksum /tmp/.next)

@@ -28,6 +28,7 @@ fi
 RGDS_GAME_LIB="$APP_ROOT/engines/openbor"
 unset ALSOFT_CONF SDL_VIDEO_DOUBLE_BUFFER || true
 
+RGDS_APP_ROOT="$APP_ROOT"
 rgds_resolve_game "$1"
 rgds_require_exec "$_bin" OpenBOR-arm64
 rgds_acquire_lock || exit 1
