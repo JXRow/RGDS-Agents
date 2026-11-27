@@ -225,6 +225,9 @@ end
 local function fail(detail)
     M.phase, M.detail = "error", detail
     bump()
+    if M.onEvent then
+        M.onEvent({ev = "error", kind = "helper", msg = detail})
+    end
     print("aid: " .. detail)
     io.stdout:flush()
     return false
@@ -413,8 +416,9 @@ function M.update()
             msg = evChannel:pop()
         end
     end
-    if thread and M.phase ~= "off" and M.phase ~= "error" and not thread:isRunning() then
+    if thread and M.phase ~= "off" and not thread:isRunning() then
         local err = thread:getError()
+        thread = nil
         local turn = M.log[#M.log]
         if turn and turn.who == "ai" then
             if turn.tool and turn.tool.status == "running" then

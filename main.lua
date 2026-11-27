@@ -41,6 +41,7 @@ local serverstate = require("serverstate")
 local targets = require("targets")
 local beginFromTap
 local clampPlay
+local serverRow
 local INPUT_LOG = "/tmp/rgds-input-v2.log"
 local shotRequested = false
 local shotTaken = false
@@ -376,7 +377,7 @@ local serverAdapter, serverLastStatus = nil, nil
 local unhealthySince = nil
 local serverPollAt = 0
 local fingerGesture = nil
-local serverRow = {
+serverRow = {
     state = "starting",
     word = serverstate.word.starting,
     detail = "Checking the server",
@@ -386,16 +387,32 @@ local serverRow = {
 
 local SERVER_KIND = {auth = true, offline = true, server = true, helper = true}
 local TURN_KIND = {timeout = true, rate_limit = true, interrupted = true, cancelled = true}
+local SERVER_RUNNING_POLL_S = 15
 
 local function serviceScript()
     return love.filesystem.getSource() .. "/" .. serverstate.paths.service
+end
+
+local function isAuthError(ev)
+    return type(ev) == "table" and ev.ev == "error" and ev.kind == "auth"
 end
 
 local function noteAdapter(msg)
     if type(msg) ~= "table" then return end
     if msg.ev == "status" then
         serverLastStatus = msg
-        serverAdapter = msg
+        if isAuthError(serverAdapter) then
+            local cause = serverstate.authCause(serverAdapter.msg)
+            if cause == "password" and msg.net == "ok" then
+                serverAdapter = msg
+            end
+        else
+            serverAdapter = msg
+        end
+    elseif msg.ev == "start" or msg.ev == "delta" or msg.ev == "done" then
+        if isAuthError(serverAdapter) then
+            serverAdapter = serverLastStatus
+        end
     elseif msg.ev == "error" and (SERVER_KIND[msg.kind] or TURN_KIND[msg.kind]) then
         serverAdapter = msg
     end
@@ -491,6 +508,9 @@ local function runServerAction(op)
     if serverStartPending then return end
     serverStartPending = true
     serverStartExit, serverStartLine = nil, nil
+    serverStatusLine, serverStatusExit = nil, nil
+    serverAdapter, serverLastStatus = nil, nil
+    unhealthySince = nil
     if shellJob then
         queuedAction = op
         return
@@ -511,6 +531,10 @@ local function finishShell(out)
         serverPollAt = 0
     elseif out ~= nil then
         serverStatusLine, serverStatusExit = serverstate.parseProbe(out)
+        local parsed = serverstate.parseStatus(serverStatusLine)
+        if serverStatusExit == 0 and parsed and parsed.health == "ok" then
+            serverStartExit, serverStartLine = nil, nil
+        end
     end
     if kind ~= "action" and queuedAction then
         local op = queuedAction
@@ -534,16 +558,21 @@ end
 
 local function maybeProbe()
     reapWizards()
-    if serverRow.state == "running" or shellJob then return end
+    if shellJob then return end
     local now = love.timer.getTime()
     if now < serverPollAt then return end
     local cmd = serverstate.probeCommand(serviceScript())
     if not startShell("status", cmd) then return end
-    serverPollAt = now + serverstate.POLL_S
+    local interval = serverRow.state == "running" and SERVER_RUNNING_POLL_S or serverstate.POLL_S
+    serverPollAt = now + interval
     aid.askStatus()
 end
 
 local function onInfoFinger(phase, x, y)
+    if shutdownDialog or selftest then
+        fingerGesture = nil
+        return
+    end
     local fired
     fired, fingerGesture = targets.step(serverTargets(), fingerGesture, phase, x, y)
     if not fired or fired.id == "stop" then return end
@@ -778,6 +807,7 @@ function love.load()
         io.stdout:flush()
     end
 
+    refreshServerRow()
     if selftest then
         love.filesystem.write("selftest.txt", "")
         probeNet()
@@ -811,13 +841,16 @@ local chatView = 1
 local chatMax = 0
 local chatEpoch = 0
 local chatRev = -1
+local chatHasSetup = false
 local chatOverflow = false
 local scrollArm = nil
 
 local function layoutChat()
-    if chatRev == aid.rev then return end
+    local hasSetup = serverRow.setup ~= nil
+    if chatRev == aid.rev and chatHasSetup == hasSetup then return end
     if aid.hasLog() and not (fonts.cjk or fonts[16]) then return end
     chatRev = aid.rev
+    chatHasSetup = hasSetup
     chatLines = {}
     chatOverflow = false
     chatMax = 0
@@ -968,7 +1001,6 @@ local function pollChatScroll()
 end
 
 function love.update(dt)
-    refreshServerRow()
     evdev.pump()
     touchpoll.pump()
     pollNet(dt)
