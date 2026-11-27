@@ -32,6 +32,7 @@ fi
 export ALSOFT_CONF="$APP_ROOT/alsoft.conf"
 export SDL_VIDEO_DOUBLE_BUFFER=1
 
+RGDS_APP_ROOT="$APP_ROOT"
 rgds_resolve_game "$1"
 rgds_require_exec "$_bin" love
 rgds_acquire_lock || exit 1

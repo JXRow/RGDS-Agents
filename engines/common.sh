@@ -22,10 +22,7 @@ unset OPENCODE_PASSWORD || true
 
 rgds_fail() {
   printf '%s\n' "$1" >&2
-  if [ "${RGDS_LOCK_HELD:-0}" = 1 ]; then
-    rm -rf "$RGDS_GAME_LOCK_DIR"
-    RGDS_LOCK_HELD=0
-  fi
+  rgds_release_lock
   exit 1
 }
 
@@ -76,7 +73,7 @@ rgds_is_our_game() {
   _id=$2
   rgds_pid_alive "$_pid" || return 1
   [ -r "/proc/$_pid/environ" ] || return 1
-  if tr '\0' '\n' < "/proc/$_pid/environ" | grep -F -x -q "RGDS_GAME_ID=$_id"; then
+  if { tr '\0' '\n' < "/proc/$_pid/environ"; } 2>/dev/null | grep -F -x -q "RGDS_GAME_ID=$_id"; then
     return 0
   fi
   return 1
@@ -133,6 +130,9 @@ rgds_realpath() {
     (CDPATH= cd -- "$_p" && pwd -P)
     return 0
   fi
+  if [ -L "$_p" ]; then
+    return 1
+  fi
   _d=$(dirname -- "$_p")
   _b=$(basename -- "$_p")
   _rd=$(CDPATH= cd -- "$_d" && pwd -P) || return 1
@@ -145,6 +145,12 @@ rgds_inside() {
   _path=$2
   [ -n "$_root" ] || return 1
   [ -n "$_path" ] || return 1
+  if [ "$_root" = "/" ]; then
+    case $_path in
+      /*) return 0 ;;
+    esac
+    return 1
+  fi
   case $_path in
     "$_root"|"$_root"/*) return 0 ;;
   esac
@@ -152,7 +158,7 @@ rgds_inside() {
 }
 
 rgds_resolve_game() {
-  local _arg _nl _resolved _root
+  local _arg _nl _resolved _root _app
   _arg=$1
   _nl='
 '
@@ -168,15 +174,22 @@ rgds_resolve_game() {
     rgds_fail "game path does not exist: $_arg"
   fi
   _root=$RGDS_WORKDIR
-  if [ -d "$_root" ]; then
-    _root=$(rgds_realpath "$_root") || rgds_fail "game path is outside the work directory: $_arg"
+  if [ ! -d "$_root" ]; then
+    rgds_fail "game path is outside the work directory: $_arg"
   fi
+  _root=$(rgds_realpath "$_root") || rgds_fail "game path is outside the work directory: $_arg"
   case $_root in
     /) ;;
     */) _root=${_root%/} ;;
   esac
   if ! rgds_inside "$_root" "$_resolved"; then
     rgds_fail "game path is outside the work directory: $_arg"
+  fi
+  if [ -n "${RGDS_APP_ROOT:-}" ] && [ -d "$RGDS_APP_ROOT" ]; then
+    _app=$(rgds_realpath "$RGDS_APP_ROOT" || true)
+    if [ -n "$_app" ] && [ "$_resolved" = "$_app" ]; then
+      rgds_fail "game path cannot be the controller directory: $_arg"
+    fi
   fi
   RGDS_GAME_PATH=$_resolved
 }
@@ -216,9 +229,10 @@ rgds_read_pidfile() {
 
 rgds_write_pidfile() {
   local _tmp
+  [ ! -d "$RGDS_GAME_PID_FILE" ] || return 1
   _tmp="$RGDS_GAME_PID_FILE.tmp.$$"
-  printf '%s\n' "$1" "$2" "$3" > "$_tmp"
-  mv -f "$_tmp" "$RGDS_GAME_PID_FILE"
+  printf '%s\n' "$1" "$2" "$3" > "$_tmp" || { rm -f "$_tmp" 2>/dev/null || true; return 1; }
+  mv -f "$_tmp" "$RGDS_GAME_PID_FILE" || { rm -f "$_tmp" 2>/dev/null || true; return 1; }
 }
 
 rgds_acquire_lock() {
@@ -228,6 +242,7 @@ rgds_acquire_lock() {
     if mkdir -m 700 "$RGDS_GAME_LOCK_DIR" 2>/dev/null; then
       printf '%s\n' "$$" > "$RGDS_GAME_LOCK_DIR/pid"
       RGDS_LOCK_HELD=1
+      trap 'rgds_release_lock; exit 1' INT TERM
       return 0
     fi
     _owner=$(sed -n '1p' "$RGDS_GAME_LOCK_DIR/pid" 2>/dev/null || true)
@@ -251,8 +266,13 @@ rgds_acquire_lock() {
 }
 
 rgds_release_lock() {
+  local _owner
+  trap - INT TERM
   if [ "${RGDS_LOCK_HELD:-0}" = 1 ]; then
-    rm -rf "$RGDS_GAME_LOCK_DIR"
+    _owner=$(sed -n '1p' "$RGDS_GAME_LOCK_DIR/pid" 2>/dev/null || true)
+    if [ -z "$_owner" ] || [ "$_owner" = "$$" ]; then
+      rm -rf "$RGDS_GAME_LOCK_DIR"
+    fi
     RGDS_LOCK_HELD=0
   fi
 }
@@ -260,7 +280,9 @@ rgds_release_lock() {
 rgds_stop_game() {
   local _pid _id _ticks _n
   if ! rgds_read_pidfile; then
-    rm -f "$RGDS_GAME_PID_FILE"
+    if [ -e "$RGDS_GAME_PID_FILE" ] && [ ! -d "$RGDS_GAME_PID_FILE" ]; then
+      rm -f "$RGDS_GAME_PID_FILE"
+    fi
     return 0
   fi
   _pid=$RGDS_REC_PID
@@ -297,7 +319,7 @@ rgds_stop_game() {
 
 rgds_last_log_line() {
   local _line _cr
-  _line=$(tail -n 1 "$RGDS_GAME_LOG" 2>/dev/null || true)
+  _line=$(awk '/[^[:space:]]/ { line = $0 } END { print line }' "$RGDS_GAME_LOG" 2>/dev/null || true)
   _cr=$(printf '\r')
   case $_line in
     *"$_cr") _line=${_line%"$_cr"} ;;
@@ -341,7 +363,7 @@ rgds_launch_game() {
   export HOME=/root
   export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/var/run}"
-  export LD_LIBRARY_PATH="$RGDS_GAME_LIB"
+  export LD_LIBRARY_PATH="${RGDS_GAME_LIB:-}"
 
   (
     # Ignore HUP so the engine survives the shell tool returning.
@@ -358,7 +380,16 @@ rgds_launch_game() {
   _pid=$!
   unset RGDS_GAME_ID || true
 
-  rgds_write_pidfile "$_pid" "$_engine" "$_game"
+  if ! rgds_write_pidfile "$_pid" "$_engine" "$_game" 2>/dev/null; then
+    rm -f "$RGDS_GAME_PID_FILE.tmp.$$"
+    kill -TERM "$_pid" 2>/dev/null || true
+    sleep 0.1
+    if rgds_pid_alive "$_pid"; then
+      kill -KILL "$_pid" 2>/dev/null || true
+    fi
+    wait "$_pid" 2>/dev/null || true
+    rgds_fail "could not write $RGDS_GAME_PID_FILE"
+  fi
 
   _ticks=$(rgds_tenths "$RGDS_GAME_START_WATCH")
   _n=0
