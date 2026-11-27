@@ -36,8 +36,7 @@ local aidSeen = 0
 local gamepid = require("gamepid")
 local finder = require("finder")
 local engines = require("engines")
-local PTT_BUTTON = gamepid.VOICE_BUTTON  -- R1：A/B/START/SELECT 已占用，食指按住不影响移动和 A
-local ptt = {held = false, bgmPaused = false}
+local ptt = {held = false, bgmPaused = false, source = nil, code = nil}
 local touchGoal = nil
 local lastTapAt, lastTapX, lastTapY = -10, 0, 0
 local evdev = require("evdev")
@@ -252,11 +251,13 @@ end
 
 -- === 按键录音（push-to-talk） ===
 -- 麦克风会拾到扬声器里的 BGM，录音期间暂停 BGM、静音音效，录完（含 0.2 s 尾巴）再恢复
-local function pttPress()
+local function pttPress(source, code)
     if ptt.held or shutdownDialog or serverRow.holdChat then return end
     if not micwave.beginClip() then return end
     aid.dismiss()
     ptt.held = true
+    ptt.source = source
+    ptt.code = code
     if audio.enabled and audio.bgm and audio.bgm:isPlaying() then
         audio.bgm:pause()
         ptt.bgmPaused = true
@@ -266,6 +267,8 @@ end
 local function pttRelease()
     if not ptt.held then return end
     ptt.held = false
+    ptt.source = nil
+    ptt.code = nil
     micwave.endClip()
 end
 
@@ -353,7 +356,6 @@ end
 -- === OpenCode server 行 ===
 -- 状态脚本在 love.thread 里跑，跟上面的网络探测一样。不看 file:close() 的返回值。
 -- 每帧 serverstate.map 出一行。手指只走 touchpoll，抬起在目标内才触发。
--- game 保持 false：STOP GAME 留给第 7 步。drawServerRow 会画 layout 里的每一个目标。
 local SERVER_CHANNEL = "rgds-server"
 local SHELL_THREAD = [[
 require("love.thread")
@@ -1292,23 +1294,25 @@ end
 function love.keypressed(key, scancode)
     recordInput("keypressed", scancode or key, key)
     if key == "escape" then love.event.quit() end
-    local cmd = gamepid.press(padPhase(), "key", key)
-    if cmd == "voice" then pttPress() end
+    local voice = panel.game and panel.game.voice
+    local cmd = gamepid.press(padPhase(), "key", key, voice)
+    if cmd == "voice" then pttPress("key", key) end
     if shutdownDialog then return end
     if key == "n" then probeNet() end
     if cmd == "confirm" or cmd == "back" or cmd == "right" then runFinder(cmd) end
 end
 
 function love.keyreleased(key)
-    if key == gamepid.VOICE_KEY then pttRelease() end
+    if ptt.held and ptt.source == "key" and ptt.code == key then pttRelease() end
 end
 
 function love.joystickpressed(joy, button)
     local name = BUTTONS[button] or ("BTN" .. button)
     recordInput("joystick", button, name)
     if panel.phase == "running" then
-        if gamepid.press("running", "button", button) == "voice" then
-            pttPress()
+        local voice = panel.game and panel.game.voice
+        if gamepid.press("running", "button", button, voice) == "voice" then
+            pttPress("button", button)
         end
         return
     end
@@ -1323,7 +1327,7 @@ function love.joystickpressed(joy, button)
     end
     local cmd = gamepid.press(padPhase(), "button", button)
     if cmd == "voice" then
-        pttPress()
+        pttPress("button", button)
     elseif cmd == "confirm" or cmd == "back" or cmd == "right" then
         runFinder(cmd)
     elseif cmd == "net" then
@@ -1335,7 +1339,7 @@ function love.joystickpressed(joy, button)
 end
 
 function love.joystickreleased(joy, button)
-    if button == PTT_BUTTON then pttRelease() end
+    if ptt.held and ptt.source == "button" and ptt.code == button then pttRelease() end
 end
 
 function love.joystickhat(_, hat, value)
@@ -1663,7 +1667,13 @@ function drawSttLine(x, y, w, h, rec, showAi)
     if rec then
         color("cream", 0.6)
         love.graphics.setFont(fonts[9])
-        love.graphics.print("release R1 to stop", x, y + 12)
+        local label = "R1"
+        if ptt.source == "button" then
+            label = BUTTONS[ptt.code] or tostring(ptt.code or "R1")
+        elseif ptt.code ~= nil then
+            label = tostring(ptt.code)
+        end
+        love.graphics.print("release " .. label .. " to stop", x, y + 12)
         return
     end
     if stt.phase == "busy" or (stt.phase == "loading" and stt.pending > 0) then

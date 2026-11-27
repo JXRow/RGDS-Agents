@@ -96,9 +96,7 @@ A game that needs R1 has a one-line file. Inside a game directory the name is `r
 
 `1` A, `2` B, `3` Y, `4` X, `5` L1, `6` R1, `7` SELECT, `8` START, `10` L3, `11` L2, `12` R2, `13` R3.
 
-No file means R1. `none` turns voice off while that game runs. The user taps STOP GAME, talks with R1 in the finder, and starts the game again. The agent writes the file when it builds or changes a game, and leaves R1 free when it can. When wired into `main.lua`, the bottom hint names the button, for example `HOLD L2 TALK`, or `VOICE OFF`.
-
-`voicebutton.lua` is in the tree, but `main.lua` does not load it yet. Until that wiring lands, the running hint stays `HOLD R1 TALK` from `gamepid.lua`.
+No file means R1. `none` turns voice off while that game runs. The user taps STOP GAME, talks with R1 in the finder, and starts the game again. The agent writes the file when it builds or changes a game, and leaves R1 free when it can. The bottom hint names the button, for example `HOLD L2 TALK`, `VOICE OFF`, or `VOICE FILE BAD`.
 
 ## Setup
 
@@ -174,7 +172,7 @@ These ran on a dev machine with `lua5.1` and `sh`. No SSH, no SDL window, no por
 - `tests/gamepid-test.lua` — live pid, dead pid, missing file, pad, STOP GAME
 - `tests/game-start-stop.sh` — a path outside the work directory is refused, the pid file is written, a second start stops the first, and the service's `XDG_*` values do not reach the stand-in engine
 
-Also on this tree: `tests/serverstate-harness.lua`, `tests/server-wire.lua`, and `tests/voicebutton-harness.lua`. `main.lua` draws the server row, does not draw the finger mark, and does not log `touch: info`. `voicebutton.lua` is in the tree and is not loaded by `main.lua` yet. STOP GAME is wired.
+Also on this tree: `tests/serverstate-harness.lua`, `tests/server-wire.lua`, `tests/voicebutton-harness.lua`, and `tests/voice-wire.lua`. `main.lua` draws the server row, does not draw the finger mark, and does not log `touch: info`. `voicebutton.lua` and STOP GAME are wired.
 
 These still need a device:
 
