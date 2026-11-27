@@ -1,17 +1,11 @@
--- RGDS-Agents (Anbernic RG DS) LÖVE 演示
--- 移植自 rg34xx-lua-app：分辨率 720x480 -> 640x480，按键表换成 RK3568 拓扑，
--- 新增触摸显示、网络探测，以及 --selftest / --inputlog 两个验证模式。
--- fixed 版：网络探测改为 love.thread 后台执行不卡帧；自检如实报告音频是否真的拿到播放设备。
--- v2：标题/分数/RUNTIME/LAST INPUT 信息面板移到第二块屏（见 subscreen.lua），主屏只剩游戏；
---     开不了第二个窗口时退回原来的单屏布局。
---     信息面板加麦克风实时波形与电平（micwave.lua / micthread.lua，经 dsnoop 共享录音）；
---     按住 R1（键盘 t）录一段语音，录音期间暂停 BGM。松开后把这段已经录好的音频
---     交给常驻的 sv-helper（stt.lua）做离线识别，信息面板留下文字和语言，
---     主屏顶部同时显示约 5 秒。识别出文字后再交给 rgds-aid（MiniMax，仍在本机），
---     回复留在信息面板，长回复在这块屏上换行，十字键上下滚动；流式输出时跟着最新一行。
---     主屏只留开头一两行，大约 5 秒。语音识别保持离线。
---     助手、密钥或网络挂了，游戏照常跑，信息面板写明原因。
---     gt9xx-0 的触摸在信息屏上。手指按下时在这块屏上画十字，并在日志里写一行。手柄保留。
+-- RGDS-Agents (Anbernic RG DS)。主窗口是 agent UI。
+-- 两块屏时主窗口在 SDL display 1（下屏，LÖVE 编号 2），第二个窗口在 SDL display 0（上屏，留给 finder）。
+-- 一块屏或 --one-screen 时只有主窗口。见 screens.lua、subscreen.lua。
+-- 花园演示已退役：不画草地、标题卡、分数和状态块，也不再用按键走路或开始一局。
+-- 麦克风波形与电平（micwave.lua / micthread.lua，经 dsnoop 共享录音）；
+-- 按住 R1（键盘 t）录一段语音。松开后交给常驻的 sv-helper（stt.lua）做离线识别，
+-- 识别出文字后再交给 rgds-aid。回复留在主窗口，长回复换行，十字键上下滚动。
+-- gt9xx-0 的触摸在主窗口（下屏）上。手指按下时画十字，并在日志里写一行。手柄保留。
 
 local W, H = 640, 480
 local windowW, windowH = W, H
@@ -70,7 +64,9 @@ local function color(name, alpha)
 end
 
 local subscreen = require("subscreen")
+local screens = require("screens")
 local hud = {external = false, error = nil}
+local screenPlan
 
 -- 游玩区（草地区域）边界；信息面板在第二块屏时草地占满主屏
 local SHARED_FIELD_TOP = 214
@@ -451,19 +447,68 @@ function installTouchWatch()
     io.stdout:flush()
 end
 
+local function placeMainWindow(oneScreen)
+    local count
+    local countOk, n = pcall(function() return love.window.getDisplayCount() end)
+    if countOk then count = n end
+    local planned = screens.plan(count, oneScreen)
+    if planned.loveDisplay == 1 or not love.window.isVisible() then
+        return planned
+    end
+    local modeOk, _, _, flags = pcall(love.window.getMode)
+    flags = modeOk and flags or {}
+
+    local function modeOn(display, fullscreen)
+        return {
+            fullscreen = fullscreen,
+            fullscreentype = fullscreen and "desktop" or flags.fullscreentype,
+            borderless = fullscreen or flags.borderless,
+            resizable = false,
+            vsync = 1,
+            highdpi = false,
+            display = display,
+        }
+    end
+
+    -- getMode 在 Wayland 上要等事件泵过才反映窗口真正落在哪块屏。
+    local function landed(display)
+        pcall(love.event.pump)
+        local checkOk, _, _, placed = pcall(love.window.getMode)
+        return checkOk and placed and placed.display == display
+    end
+
+    local function tryMove(fullscreen)
+        local setOk, moved = pcall(love.window.setMode, W, H, modeOn(planned.loveDisplay, fullscreen))
+        return setOk and moved and landed(planned.loveDisplay)
+    end
+
+    if tryMove(flags.fullscreen == true) then
+        return planned
+    end
+    -- Weston 不把普通窗口挪到另一块输出。副窗口已经用无边框全屏落在指定屏上。
+    if flags.fullscreen ~= true and tryMove(true) then
+        return planned
+    end
+    return screens.plan(1), "could not move the main window"
+end
+
 function love.load()
+    local oneScreen = false
+    for _, value in ipairs(arg or {}) do
+        if value == "--selftest" then selftest = true end
+        if value == "--inputlog" then inputlog = true end
+        if value == "--shot" then shotRequested = true end
+        if value == "--one-screen" then oneScreen = true end
+    end
+
+    local placeErr
+    screenPlan, placeErr = placeMainWindow(oneScreen)
+
     love.graphics.setDefaultFilter("nearest", "nearest")
     for _, size in ipairs({8, 9, 10, 11, 12, 14, 16, 20, 22, 28}) do
         fonts[size] = love.graphics.newFont(size)
     end
     fonts.cjk = loadCjkFont(16)
-
-    for _, value in ipairs(arg or {}) do
-        if value == "--selftest" then selftest = true end
-        if value == "--inputlog" then inputlog = true end
-        if value == "--shot" then shotRequested = true end
-        if value == "--one-screen" then hud.error = "disabled by --one-screen" end
-    end
 
     love.math.setRandomSeed(os.time())
     initAudio()
@@ -479,17 +524,26 @@ function love.load()
     aid.start()
     windowW, windowH = love.graphics.getWidth(), love.graphics.getHeight()
 
-    if not hud.error and not love.window.isVisible() then hud.error = "main window hidden" end
-    if not hud.error then
+    if not screenPlan.openSecondWindow then
+        hud.error = placeErr or (oneScreen and "disabled by --one-screen" or "single display")
+    elseif not love.window.isVisible() then
+        hud.error = "main window hidden"
+    else
         local ok, err = subscreen.open(W, H)
+        if ok and (subscreen.mainDisplay ~= screenPlan.agentsSdl or subscreen.display ~= screenPlan.secondSdl) then
+            subscreen.close()
+            ok = false
+            err = string.format("displays main %s second %s, wanted %d and %d",
+                tostring(subscreen.mainDisplay), tostring(subscreen.display),
+                screenPlan.agentsSdl, screenPlan.secondSdl)
+        end
         hud.external, hud.error = ok, err
     end
     if hud.external then
-        setFieldTop(0)
-        print(string.format("subscreen: info pane on display %d (main window on display %d)",
+        print(string.format("subscreen: second window on display %d (main window on display %d)",
             subscreen.display, subscreen.mainDisplay))
     else
-        print("subscreen: off (" .. tostring(hud.error) .. "), info pane stays on the main screen")
+        print("subscreen: off (" .. tostring(hud.error) .. "), one window")
     end
     io.stdout:flush()
 
@@ -501,7 +555,8 @@ function love.load()
         renderer = tostring(renderer) .. " " .. tostring(version),
         gpu = tostring(vendor) .. " / " .. tostring(device),
         input = #joysticks > 0 and ("Pad: " .. tostring(joysticks[1]:getName())) or "Keyboard only",
-        output = hud.external and string.format("%d x %d + info on display %d", windowW, windowH, subscreen.display)
+        output = hud.external and string.format("%d x %d on display %d, second window on display %d",
+            windowW, windowH, subscreen.mainDisplay, subscreen.display)
             or string.format("%d x %d", windowW, windowH),
         lua = _VERSION .. " / LÖVE " .. string.format("%d.%d.%d", major, minor, revision)
     }
@@ -516,7 +571,7 @@ function love.load()
     for _ = 1, 24 do addPetal() end
     reset()
 
-    -- Weston 不把 gt9xx-0 派发给 SDL。信息屏的点按从 event1 直接读。
+    -- Weston 不把 gt9xx-0 派发给 SDL。下屏的点按从 event1 直接读。
     local evOk, evErr = evdev.open(nil, W, H, function(phase, x, y)
         noteFinger(phase, x, y)
     end)
@@ -754,113 +809,13 @@ function love.update(dt)
         time = time + dt
         return
     end
-    -- 标题画面原本降到 ~6 fps 省电。手指在信息屏上时不能睡，否则十字会一顿一顿。
-    if not started and not micwave.isLive() and not (finger and finger.down) then
-        if aid.phase == "thinking" or aid.phase == "streaming" then
-            touchpoll.pump()
-        else
-            local wake = love.timer.getTime() + 0.15
-            while love.timer.getTime() < wake do
-                touchpoll.pump()
-                if finger and finger.down then break end
-                love.timer.sleep(0.016)
-            end
-        end
-    end
-
     time = time + dt
-    pulse = math.max(0, pulse - dt)
-
-    for _, petal in ipairs(petals) do
-        petal.y = petal.y + petal.speed * dt
-        petal.x = petal.x + math.sin(time * 0.7 + petal.drift) * 8 * dt
-        if petal.y > H + 8 then
-            petal.y = FIELD_TOP
-            petal.x = math.random() * W
-        end
-    end
-
-    for i = #sparks, 1, -1 do
-        local spark = sparks[i]
-        spark.x = spark.x + spark.vx * dt
-        spark.y = spark.y + spark.vy * dt
-        spark.vy = spark.vy + 150 * dt
-        spark.life = spark.life - dt
-        if spark.life <= 0 then table.remove(sparks, i) end
-    end
-
-    local dx, dy = 0, 0
-    local lockV = pollChatScroll()
-    local joystick = love.joystick.getJoysticks()[1]
-    if joystick then
-        local hat = joystick:getHat(1)
-        -- hat 优先；只有 hat 归中时才看左摇杆，避免轴上 0 值覆盖 hat（RG 系列通用坑）
-        -- 回复比信息屏高时，上/下改成滚动，左/右仍走路
-        if hat and hat ~= "c" and hat ~= "" then
-            if not lockV and hat:find("u") then dy = dy - 1 end
-            if not lockV and hat:find("d") then dy = dy + 1 end
-            if hat:find("l") then dx = dx - 1 end
-            if hat:find("r") then dx = dx + 1 end
-        else
-            local jx, jy = joystick:getGamepadAxis("leftx"), joystick:getGamepadAxis("lefty")
-            if jx and math.abs(jx) > 0.18 then dx = jx end
-            if jy and math.abs(jy) > 0.18 and not lockV then dy = jy end
-        end
-    end
-    if isDown({"left", "a"}) then dx = dx - 1 end
-    if isDown({"right", "d"}) then dx = dx + 1 end
-    if not lockV and isDown({"up", "w"}) then dy = dy - 1 end
-    if not lockV and isDown({"down", "s"}) then dy = dy + 1 end
-
-    if shutdownDialog then
-        touchGoal = nil
-    elseif dx ~= 0 or dy ~= 0 then
-        touchGoal = nil
-    elseif touchGoal and started then
-        local vx, vy = touchGoal.x - player.x, touchGoal.y - player.y
-        local dist = math.sqrt(vx * vx + vy * vy)
-        local step = player.speed * dt
-        if dist <= math.max(6, step) then
-            player.x, player.y = touchGoal.x, touchGoal.y
-            touchGoal = nil
-        else
-            dx, dy = vx / dist, vy / dist
-        end
-    end
-
-    local length = math.sqrt(dx * dx + dy * dy)
-    if length > 1 then dx, dy = dx / length, dy / length end
-    player.x = math.max(32, math.min(W - 32, player.x + dx * player.speed * dt))
-    player.y = math.max(PLAYER_MIN_Y, math.min(PLAYER_MAX_Y, player.y + dy * player.speed * dt))
-
-    table.insert(player.trail, 1, {x = player.x, y = player.y, life = 0.28})
-    if #player.trail > 12 then table.remove(player.trail) end
-    for _, point in ipairs(player.trail) do point.life = point.life - dt end
-
-    local distance = math.sqrt((player.x - seed.x) ^ 2 + (player.y - seed.y) ^ 2)
-    if distance < player.r + 16 then
-        score = score + 1
-        best = math.max(best, score)
-        pulse = 0.5
-        addSpark(seed.x, seed.y, 16)
-        spawnSeed()
-        playSfx("collect")
-    end
+    pollChatScroll()
 end
 
 function love.keypressed(key, scancode)
     recordInput("keypressed", scancode or key, key)
     if key == "escape" then love.event.quit() end
-    if key == "space" or key == "return" or key == "kpenter" then
-        if not started then
-            started = true
-            playSfx("start")
-            startBgm()
-        else
-            playSfx("start")
-        end
-    end
-    if key == "r" then reset(); playSfx("reset") end
     if key == "n" then probeNet() end
     if key == "t" then pttPress() end
 end
@@ -881,13 +836,7 @@ function love.joystickpressed(joy, button)
         end
         return
     end
-    if button == 1 or button == 8 then          -- A / START
-        if not started then
-            started = true
-            playSfx("start")
-            startBgm()
-        end
-    elseif button == 2 then                     -- B
+    if button == 2 then                         -- B
         probeNet()
     elseif button == 7 then                     -- SELECT
         pttRelease()
@@ -1003,64 +952,6 @@ local function drawInputOrSetup()
     if aid.setup then drawSetupPanel() else drawInputPanel() end
 end
 
-local function drawGame()
-    color("grass")
-    love.graphics.rectangle("fill", 0, FIELD_TOP, W, H - FIELD_TOP)
-    color("grass2", 0.45)
-    for x = -30, W, 52 do
-        love.graphics.line(x, FIELD_TOP, x + 200, H)
-    end
-    for y = FIELD_TOP + 40, H, 42 do
-        love.graphics.line(0, y, W, y - 110)
-    end
-
-    for _, spark in ipairs(sparks) do
-        color("gold", math.min(1, spark.life * 2))
-        love.graphics.circle("fill", spark.x, spark.y, spark.size)
-    end
-
-    local seedBob = math.sin(time * 3 + seed.phase) * 5
-    color("pink", 0.16)
-    love.graphics.circle("fill", seed.x, seed.y + seedBob, 28 + math.sin(time * 4) * 3)
-    color("pink")
-    love.graphics.circle("fill", seed.x, seed.y + seedBob, 11)
-    color("cream")
-    love.graphics.circle("fill", seed.x - 6, seed.y - 2 + seedBob, 4)
-    love.graphics.circle("fill", seed.x + 6, seed.y - 2 + seedBob, 4)
-    color("gold")
-    love.graphics.circle("fill", seed.x, seed.y + 7 + seedBob, 3.5)
-
-    if touchGoal then
-        color("mint", 0.85)
-        love.graphics.circle("line", touchGoal.x, touchGoal.y, 10)
-        love.graphics.circle("fill", touchGoal.x, touchGoal.y, 2.5)
-    end
-
-    for _, point in ipairs(player.trail) do
-        if point.life > 0 then
-            color("mint", point.life * 0.3)
-            love.graphics.circle("fill", point.x, point.y, 5)
-        end
-    end
-
-    color("ink", 0.35)
-    love.graphics.ellipse("fill", player.x, player.y + 20, 20, 7)
-    color("mint")
-    love.graphics.circle("fill", player.x, player.y, player.r)
-    color("cream")
-    love.graphics.circle("fill", player.x - 5, player.y - 4, 3.5)
-    love.graphics.circle("fill", player.x + 5, player.y - 4, 3.5)
-    color("ink")
-    love.graphics.circle("fill", player.x - 5, player.y - 4, 1.6)
-    love.graphics.circle("fill", player.x + 5, player.y - 4, 1.6)
-    love.graphics.arc("line", "open", player.x - 6, player.y + 1, 6, 0.2, math.pi - 0.2)
-
-    if pulse > 0 then
-        color("gold", pulse * 0.5)
-        love.graphics.circle("line", seed.x, seed.y, 28 + (0.5 - pulse) * 50)
-    end
-end
-
 local function drawSky()
     color("sky")
     love.graphics.rectangle("fill", 0, 0, W, H)
@@ -1069,59 +960,16 @@ local function drawSky()
     love.graphics.circle("fill", 80, 470, 150)
 end
 
-local function drawHeader()
-    color("cream")
-    love.graphics.setFont(fonts[22])
-    love.graphics.print("POCKET GARDEN", 14, 14)
-    color("mint", 0.75)
-    love.graphics.setFont(fonts[10])
-    love.graphics.print("RGDS · LÖVE demo · v2", 16, 42)
-    color("gold", 0.85)
-    love.graphics.setFont(fonts[9])
-    love.graphics.print(string.format("FPS %02d · MEM %.1f MB · SND %s · MIC %s", love.timer.getFPS(),
-        collectgarbage("count") / 1024, audio.enabled and "on" or "off",
-        micwave.recording and "REC" or (micwave.isLive() and "live" or "off")), 210, 42)
-
-    drawRoundedBox(452, 12, 176, 46, 12, "ink", 0.72)
-    color("gold")
-    love.graphics.setFont(fonts[9])
-    love.graphics.print("SEEDS COLLECTED", 466, 20)
-    color("cream")
-    love.graphics.setFont(fonts[20])
-    love.graphics.print(string.format("%02d", score), 466, 31)
-    color("mint", 0.8)
-    love.graphics.setFont(fonts[9])
-    love.graphics.print("BEST " .. string.format("%02d", best), 528, 36)
-end
-
-local function drawHint(info)
+local function drawHint()
     color("cream", 0.7)
     love.graphics.setFont(fonts[9])
     local hint
-    if info and aid.hasLog() then
-        hint = "D-PAD UP  OLDER   ·   D-PAD DOWN  NEWER   ·   TAP WALK   ·   HOLD R1 TALK   ·   SELECT QUIT"
-    elseif hud.external then
-        hint = "HAT OR TAP WALK  ·  A START  ·  B NET  ·  HOLD R1 TALK  ·  SELECT QUIT  ·  R RESTART"
+    if aid.hasLog() then
+        hint = "D-PAD UP  OLDER   ·   D-PAD DOWN  NEWER   ·   HOLD R1 TALK   ·   SELECT QUIT"
     else
-        hint = "HAT MOVE  ·  A START  ·  B NET  ·  SELECT QUIT  ·  R RESTART"
+        hint = "HOLD R1 TALK  ·  B NET  ·  SELECT QUIT"
     end
     love.graphics.printf(hint, 0, H - 16, W, "center")
-end
-
--- 只在第二块屏上画：游玩状态，逐帧刷新
-local function drawStatusPanel()
-    drawRoundedBox(12, 212, 616, 82, 12, "ink", 0.9)
-    color("gold")
-    love.graphics.setFont(fonts[10])
-    love.graphics.print("GARDEN", 24, 220)
-    local state = shutdownDialog and "SHUTDOWN?" or (started and "PLAYING" or "TITLE")
-    local bgm = audio.enabled and audio.bgm and audio.bgm:isPlaying()
-    drawRuntimeItem("STATE", state, 24, 240, 18)
-    drawRuntimeItem("PLAYER", string.format("%3.0f, %3.0f", player.x, player.y), 172, 240, 20)
-    drawRuntimeItem("SEED", string.format("%3.0f, %3.0f", seed.x, seed.y), 360, 240, 20)
-    drawRuntimeItem("TIME", string.format("%02d:%04.1f", math.floor(time / 60), time % 60), 24, 266, 18)
-    drawRuntimeItem("AUDIO", audio.enabled and (bgm and "on · bgm playing" or "on") or "off", 172, 266, 20)
-    drawRuntimeItem("FRAME", tostring(subscreen.frames), 360, 266, 20)
 end
 
 local MIC_FLOOR_DB = -60
@@ -1209,7 +1057,7 @@ local function drawMicPanel()
     end
 end
 
--- 信息面板底部：识别中画 …，完成后留下文字和语言。FRAME / TIME 在 GARDEN 里，不在这里。
+-- 麦克风面板底部：识别中画 …，完成后留下文字和语言。
 local function printWrapped(font, text, x, y, limit, maxLines)
     love.graphics.setFont(font)
     local _, wrapped = font:getWrap(text, limit)
@@ -1312,34 +1160,6 @@ function drawSttLine(x, y, w, h, rec, showAi)
     love.graphics.print("hold R1 (or t) to record a clip", x, y + 12)
 end
 
--- 主屏（DSI-1）顶部一两行，约 5 秒后消失。不挡整块草地。
-local function drawSttBanner()
-    local text, tag
-    if aid.bannerActive() then
-        text, tag = aid.bannerText, "AI"
-    elseif stt.bannerActive() then
-        text, tag = stt.bannerText, stt.bannerLang
-    else
-        return
-    end
-    local font = fonts.cjk or fonts[16]
-    local hasTag = tag and tag ~= ""
-    local textX = hasTag and 64 or 24
-    local limit = W - textX - 20
-    love.graphics.setFont(font)
-    local _, lines = font:getWrap(text, limit)
-    local n = math.max(1, math.min(2, #lines))
-    local boxH = 10 + n * font:getHeight() + 6
-    drawRoundedBox(12, 8, W - 24, boxH, 10, "ink", 0.88)
-    if hasTag then
-        color("gold")
-        love.graphics.setFont(fonts[12])
-        love.graphics.print(tag, 24, 14)
-    end
-    color("cream")
-    printWrapped(font, text, textX, 12, limit, 2)
-end
-
 local function drawChatLog()
     layoutChat()
     local x, y, w, h = 12, 64, CHAT_W, CHAT_H
@@ -1416,17 +1236,15 @@ end
 
 local function drawInfoScreen()
     drawSky()
-    drawHeader()
     if aid.hasLog() then
         drawChatLog()
         drawMicStrip()
     else
         drawRuntimePanel()
         drawInputOrSetup()
-        drawStatusPanel()
         drawMicPanel()
     end
-    drawHint(true)
+    drawHint()
     drawFingerMark()
 end
 
@@ -1448,39 +1266,7 @@ function drawFingerMark()
 end
 
 function love.draw()
-    drawSky()
-
-    for _, petal in ipairs(petals) do
-        color("cream", 0.12 + petal.size / 18)
-        love.graphics.circle("fill", petal.x, petal.y, petal.size)
-    end
-
-    if not hud.external then drawHeader() end
-
-    drawGame()
-
-    if not started then
-        local top = FIELD_TOP + (H - FIELD_TOP) / 2 - 85
-        color("ink", 0.82)
-        love.graphics.rectangle("fill", 0, FIELD_TOP, W, H - FIELD_TOP)
-        color("cream")
-        love.graphics.setFont(fonts[28])
-        love.graphics.printf("GROW SOMETHING", 0, top, W, "center")
-        color("mint")
-        love.graphics.setFont(fonts[12])
-        love.graphics.printf("Collect the glowing seeds", 0, top + 40, W, "center")
-        drawRoundedBox(200, top + 80, 240, 44, 14, "gold")
-        color("ink")
-        love.graphics.setFont(fonts[14])
-        love.graphics.printf("TAP  OR  PRESS  A", 200, top + 94, 240, "center")
-    end
-
-    if not hud.external then
-        drawRuntimePanel()
-        drawInputOrSetup()
-    end
-
-    drawSttBanner()
+    drawInfoScreen()
 
     if shutdownDialog then
         color("ink", 0.7)
@@ -1495,10 +1281,7 @@ function love.draw()
     end
 
     if hud.external then
-        subscreen.present(drawInfoScreen)
-    else
-        drawFingerMark()
-        drawHint()
+        subscreen.present(function() end)
     end
 
     if selftest then
@@ -1541,7 +1324,7 @@ function drawSelftest()
     add("mic", string.format("%s (%s), rms %.0f dBFS", micwave.state, tostring(micwave.detail), micwave.rmsDb))
     add("stt", stt.phase .. (stt.detail ~= "" and (" (" .. stt.detail .. ")") or ""))
     add("aid", aid.phase .. (aid.detail ~= "" and (" (" .. aid.detail .. ")") or ""))
-    add("subscreen", hud.external and string.format("info pane on display %d, %d frames", subscreen.display, subscreen.frames)
+    add("subscreen", hud.external and string.format("second window on display %d, %d frames", subscreen.display, subscreen.frames)
         or ("off: " .. tostring(hud.error)))
     add("mem KB", string.format("%.0f", collectgarbage("count")))
 
