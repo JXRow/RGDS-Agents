@@ -457,17 +457,36 @@ local function placeMainWindow(oneScreen)
     end
     local modeOk, _, _, flags = pcall(love.window.getMode)
     flags = modeOk and flags or {}
-    local setOk, moved = pcall(love.window.setMode, W, H, {
-        fullscreen = flags.fullscreen,
-        fullscreentype = flags.fullscreentype,
-        borderless = flags.borderless,
-        resizable = false,
-        vsync = 1,
-        highdpi = false,
-        display = planned.loveDisplay,
-    })
-    local checkOk, _, _, placed = pcall(love.window.getMode)
-    if setOk and moved and checkOk and placed and placed.display == planned.loveDisplay then
+
+    local function modeOn(display, fullscreen)
+        return {
+            fullscreen = fullscreen,
+            fullscreentype = fullscreen and "desktop" or flags.fullscreentype,
+            borderless = fullscreen or flags.borderless,
+            resizable = false,
+            vsync = 1,
+            highdpi = false,
+            display = display,
+        }
+    end
+
+    -- getMode 在 Wayland 上要等事件泵过才反映窗口真正落在哪块屏。
+    local function landed(display)
+        pcall(love.event.pump)
+        local checkOk, _, _, placed = pcall(love.window.getMode)
+        return checkOk and placed and placed.display == display
+    end
+
+    local function tryMove(fullscreen)
+        local setOk, moved = pcall(love.window.setMode, W, H, modeOn(planned.loveDisplay, fullscreen))
+        return setOk and moved and landed(planned.loveDisplay)
+    end
+
+    if tryMove(flags.fullscreen == true) then
+        return planned
+    end
+    -- Weston 不把普通窗口挪到另一块输出。副窗口已经用无边框全屏落在指定屏上。
+    if flags.fullscreen ~= true and tryMove(true) then
         return planned
     end
     return screens.plan(1), "could not move the main window"

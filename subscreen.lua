@@ -76,6 +76,16 @@ function M.open(width, height)
         bit.bor(SDL_WINDOW_OPENGL, SDL_WINDOW_FULLSCREEN, SDL_WINDOW_BORDERLESS))
     if hud == nil then return false, sdlError("CreateWindow") end
 
+    -- 请求的 display 和 Weston 实际放置的 display 可能不是同一个。
+    SDL.SDL_PumpEvents()
+    local actual = SDL.SDL_GetWindowDisplayIndex(hud)
+    if actual < 0 then
+        local err = sdlError("GetWindowDisplayIndex")
+        M.close()
+        return false, err
+    end
+    M.display = actual
+
     if SDL.SDL_GL_MakeCurrent(hud, ctx) ~= 0 then
         local err = sdlError("GL_MakeCurrent")
         SDL.SDL_GL_MakeCurrent(mainWin, ctx)
