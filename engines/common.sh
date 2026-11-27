@@ -302,7 +302,9 @@ rgds_stop_game() {
     sleep 0.1
     _n=$((_n + 1))
   done
-  if rgds_pid_alive "$_pid"; then
+  # TERM can reap the game and reuse this pid, or the game can exec
+  # something else, before the grace ends. Kill only if it is still ours.
+  if rgds_is_our_game "$_pid" "$_id"; then
     kill -KILL "$_pid" 2>/dev/null || true
   fi
   _n=0
