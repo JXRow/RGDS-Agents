@@ -19,10 +19,15 @@ local function check(name, cond, extra)
     io.stderr:write("\n")
 end
 
+local function cmdOk(cmd)
+    local status = os.execute(cmd)
+    return status == true or status == 0
+end
+
 local function tmpdir()
     local name = os.tmpname()
     os.remove(name)
-    assert(os.execute("mkdir " .. name) == 0, "mkdir " .. name)
+    assert(cmdOk("mkdir " .. name), "mkdir " .. name)
     return name
 end
 
@@ -42,7 +47,12 @@ local function invariants(name, row)
         check(name .. " log", row.log == nil, row.log)
     end
     if row.state == "auth" then
-        local want = row.authCause == "password" and "restart" or "wizard"
+        local want
+        if row.authCause == "password" then
+            want = "restart"
+        elseif not row.setup then
+            want = "wizard"
+        end
         check(name .. " auth action", row.action == want, row.action)
         check(name .. " cause", row.authCause == "password" or row.authCause == "key", row.authCause)
     else
@@ -154,6 +164,8 @@ check("model null", M.readModel('{"model":null}') == nil)
 check("model number", M.readModel('{"model":1}') == nil)
 check("model missing", M.readModel("{}") == nil)
 check("model split", M.readModel('"model":\n  "anthropic/claude-sonnet-4-5"') == "anthropic/claude-sonnet-4-5")
+check("model nested only ignored", M.readModel('{"agent":{"build":{"model":"nested/m"}}}') == nil)
+check("model top level wins over nested", M.readModel('{"agent":{"build":{"model":"nested/m"}},"model":"top/m"}') == "top/m")
 check("model not text", M.readModel(nil) == nil)
 
 do
@@ -212,6 +224,10 @@ expect("no model", {model = ""}, {state = "not_configured", detail = "No model c
 expect("model false", {model = false}, {state = "not_configured", action = "wizard"})
 expect("config empty", {configText = "{}"}, {state = "not_configured", action = "wizard"})
 expect("config blank model", {configText = '{"model":"   "}'}, {state = "not_configured"})
+expect("config nested model only", up({
+    model = NIL,
+    configText = '{"agent":{"build":{"model":"nested/m"}}}',
+}), {state = "not_configured", action = "wizard"})
 expect("config text", {configText = CONFIG}, {state = "starting", detail = "Checking the server"})
 
 expect("unconfigured but up", up({model = NIL, configText = "{}"}), {
@@ -326,6 +342,13 @@ expect("ev net offline", withEvent({ev = "status", net = "offline", session_id =
 })
 expect("ev auth key", withEvent({ev = "error", kind = "auth", msg = "no", id = "r1"}), {
     state = "auth", detail = "no", action = "wizard", authCause = "key",
+})
+expect("ev auth key with setup running", up({
+    adapter = {ev = "error", kind = "auth", msg = "bad key"},
+    setupText = SETUP,
+}), {
+    state = "auth", detail = "bad key", action = nil, authCause = "key",
+    setup = {url = "http://192.0.2.10:8787/", token = "AB3K9M"},
 })
 expect("ev auth password", withEvent({
     ev = "error", kind = "auth", msg = "opencode password missing",
@@ -498,7 +521,7 @@ do
 
     local script = dir .. "/status.sh"
     writeFile(script, "#!/bin/sh\necho 'running (pid: 9, health: ok)'\nexit 0\n")
-    assert(os.execute("chmod +x " .. script) == 0)
+    assert(cmdOk("chmod +x " .. script))
     local pipe = assert(io.popen(M.probeCommand(script)))
     local output = pipe:read("*a")
     pipe:close()
@@ -514,7 +537,7 @@ do
 
     local failScript = dir .. "/fail.sh"
     writeFile(failScript, "#!/bin/sh\necho '!! workdir not found: /missing' >&2\nexit 1\n")
-    assert(os.execute("chmod +x " .. failScript) == 0)
+    assert(cmdOk("chmod +x " .. failScript))
     pipe = assert(io.popen(M.actionCommand("start", failScript)))
     output = pipe:read("*a")
     pipe:close()
