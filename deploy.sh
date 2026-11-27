@@ -8,6 +8,10 @@
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/conf.lua
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/screens.lua       ← 主窗口放哪块屏
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/subscreen.lua     ← 上屏的第二个窗口
+#   /mnt/mmc/Roms/APPS/RGDS-Agents/finder.lua        ← 上屏的文件列表
+#   /mnt/mmc/Roms/APPS/RGDS-Agents/engines.lua       ← LÖVE 和 OpenBOR
+#   /mnt/mmc/Roms/APPS/RGDS-Agents/gamepid.lua       ← pid 文件和上屏状态
+#   /mnt/mmc/Roms/APPS/RGDS-Agents/targets.lua       ← 下屏 STOP GAME 的命中
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/evdev.lua         ← 下屏触摸（event1），Weston 不把点按派给 SDL
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/micwave.lua       ← 麦克风波形/电平/按键录音（主线程）
 #   /mnt/mmc/Roms/APPS/RGDS-Agents/micthread.lua     ← 录音线程（OpenAL → 共享环形缓冲）
@@ -90,7 +94,7 @@ opencode_should_skip_upload() {
 echo ">> 目标: $TARGET"
 echo ">> 复制应用代码"
 rssh "$TARGET" "mkdir -p '$GAME/bin' '$GAME/lib' '$APPS/Imgs'"
-rscp main.lua conf.lua screens.lua serverstate.lua targets.lua subscreen.lua evdev.lua touchpoll.lua touchthread.lua micwave.lua micthread.lua stt.lua sttthread.lua aid.lua aidthread.lua rgds-aid.py alsoft.conf run-via-menu.sh "$TARGET:$GAME/"
+rscp main.lua conf.lua screens.lua serverstate.lua subscreen.lua finder.lua engines.lua gamepid.lua targets.lua evdev.lua touchpoll.lua touchthread.lua micwave.lua micthread.lua stt.lua sttthread.lua aid.lua aidthread.lua rgds-aid.py alsoft.conf run-via-menu.sh "$TARGET:$GAME/"
 rssh "$TARGET" "chmod +x '$GAME/run-via-menu.sh'"
 
 echo ">> 复制游戏引擎启动脚本"
