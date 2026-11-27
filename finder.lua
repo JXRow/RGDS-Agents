@@ -23,6 +23,8 @@
 -- 目录的 names 是该层的名字，按字节序排，文件的 names 是 nil。
 -- 返回 nil，或一张表 {id, label, startable, hint, start, ...}。
 -- startable 省略时当作 true。startable 为 false 时 kind 行用 hint（没有 hint 就用 label）。
+-- 接线用 engines.forFinder。engines.match 只认 kind "directory"，也不带 startable 和 hint。
+-- 把 match 直接当 engineOf 时，缺 binary 的 .pak 会被当成能启动。
 -- 本应用目录即使 engineOf 返回了引擎，也只当作普通文件夹。
 
 local M = {}
