@@ -112,6 +112,16 @@ while True:
     time.sleep(30)
 '
     ;;
+  drop-id)
+    exec python3 -c 'import os, signal
+def drop(*_args):
+    os.environ.pop("RGDS_GAME_ID", None)
+    os.execvp("sleep", ["sleep", "60"])
+signal.signal(signal.SIGTERM, drop)
+while True:
+    signal.pause()
+'
+    ;;
 esac
 exec sleep 60
 EOF
@@ -467,6 +477,32 @@ if [ -e "$RGDS_GAME_PID_FILE" ]; then
   fail "stubborn pid file remained"
 fi
 ok "stop kills when TERM is ignored"
+
+# After TERM the same pid can be a different process. Do not SIGKILL it.
+FAKE_OUT=$TMP/drop-id.out
+run env RGDS_LOVE_BIN="$TMP/fake-engine" RGDS_FAKE_OUT="$FAKE_OUT" RGDS_FAKE_MODE=drop-id \
+  "$LOVE" "$WORK/my game"
+assert_code 0 "drop-id start"
+dropped=$LAST_OUT
+note "$dropped"
+if ! alive "$dropped"; then
+  fail "drop-id engine did not stay up"
+fi
+env_has "RGDS_GAME_ID=love" "$FAKE_OUT"
+run env RGDS_GAME_STOP_GRACE=1 "$STOP"
+still=no
+if alive "$dropped"; then
+  still=yes
+fi
+kill -KILL "$dropped" 2>/dev/null || true
+assert_code 0 "stop after the game execs away"
+if [ "$still" != yes ]; then
+  fail "stop killed a pid that dropped RGDS_GAME_ID"
+fi
+if [ -e "$RGDS_GAME_PID_FILE" ]; then
+  fail "drop-id pid file remained"
+fi
+ok "stop leaves a pid that is no longer the game"
 
 # PATH lookup, and an injected binary wins over PATH.
 FAKE_OUT=$TMP/path-love.out

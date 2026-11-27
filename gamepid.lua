@@ -3,9 +3,11 @@
 -- 服务器密码只用来从失败行里抹掉，这里不打印它。
 --
 -- read(path) 没有文件、读不出、或第一行不是 pid 时返回 nil。
--- 否则返回 {pid, id, path, alive}。alive 是 kill -0，僵尸不算。
+-- 否则返回 {pid, id, path, alive}。alive 先是 kill -0，僵尸不算。
+-- 进程还在时，还要 /proc/<pid>/environ 里有 RGDS_GAME_ID=<id>。
+-- 对不上的活 pid 不算在跑。这里不打印 environ。
 -- observe(state, reading) 返回新的 state，以及 "close"、"open" 或 nil。
--- 活的 pid 关掉 finder。pid 没了再打开。选中项由调用方留着。
+-- 对得上的活 pid 关掉 finder。pid 没了再打开。选中项由调用方留着。
 -- fail 把脚本的一行放进 notice，最多 180 个字符。finder 留着。
 -- 轮询间隔是 0.25 秒，这样 start.sh 里 1 秒的等待够先关掉窗口。
 
@@ -32,6 +34,24 @@ local function trimCr(line)
     if type(line) ~= "string" then return nil end
     if line:sub(-1) == "\r" then line = line:sub(1, -2) end
     return line
+end
+
+local function launchMarker(pid, id)
+    if type(id) ~= "string" or id == "" then return false end
+    local handle = io.open("/proc/" .. tostring(pid) .. "/environ", "rb")
+    if not handle then return false end
+    local text = handle:read("*a") or ""
+    handle:close()
+    local needle = "RGDS_GAME_ID=" .. id
+    local from = 1
+    while true do
+        local at = text:find(needle, from, true)
+        if not at then return false end
+        local beforeOk = at == 1 or text:byte(at - 1) == 0
+        local after = text:byte(at + #needle)
+        if beforeOk and (after == nil or after == 0) then return true end
+        from = at + 1
+    end
 end
 
 function M.alive(pid)
@@ -65,11 +85,15 @@ function M.read(path)
     gamePath = trimCr(gamePath)
     if id == "" then id = nil end
     if gamePath == "" then gamePath = nil end
+    local alive = M.alive(pid)
+    if alive and not launchMarker(pid, id) then
+        alive = false
+    end
     return {
         pid = pid,
         id = id,
         path = gamePath,
-        alive = M.alive(pid),
+        alive = alive,
     }
 end
 

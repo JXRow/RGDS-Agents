@@ -63,6 +63,14 @@ local function spawnSleep()
     return pid
 end
 
+local function spawnTagged(id)
+    local handle = io.popen("RGDS_GAME_ID=" .. tostring(id) .. " sleep 30 >/dev/null & echo $!")
+    local pid = handle and tonumber(handle:read("*l"))
+    if handle then handle:close() end
+    if pid then kills[#kills + 1] = pid end
+    return pid
+end
+
 local function waitResult(dir, secret)
     for _ = 1, 40 do
         local result = gamepid.finish(dir, secret)
@@ -95,16 +103,29 @@ selfFile:close()
 local selfPid = tonumber(selfText:match("^(%d+)"))
 check(type(selfPid) == "number" and gamepid.alive(selfPid), "this process is alive")
 
+local tagged = spawnTagged("love")
+check(type(tagged) == "number", "spawned a tagged game")
 local livePath = tmp .. "/live.pid"
 local liveGame = "/work/demo.love"
-writeFile(livePath, selfPid .. "\nlove\n" .. liveGame .. "\n")
-local live = gamepid.read(livePath)
-check(type(live) == "table", "live pid file")
-if live then
-    check(live.pid == selfPid, "live pid number")
-    check(live.id == "love", "live engine id")
-    check(live.path == liveGame, "live game path")
-    check(live.alive == true, "live pid is alive")
+local live
+if tagged then
+    writeFile(livePath, tagged .. "\nlove\n" .. liveGame .. "\n")
+    live = gamepid.read(livePath)
+    check(type(live) == "table", "live pid file")
+    if live then
+        check(live.pid == tagged, "live pid number")
+        check(live.id == "love", "live engine id")
+        check(live.path == liveGame, "live game path")
+        check(live.alive == true, "tagged pid is our game")
+    end
+    writeFile(livePath, tagged .. "\nopenbor\n" .. liveGame .. "\n")
+    local wrong = gamepid.read(livePath)
+    check(wrong and wrong.alive == false, "a different engine id is not our game")
+    writeFile(livePath, tagged .. "\n\n" .. liveGame .. "\n")
+    local blankId = gamepid.read(livePath)
+    check(blankId and blankId.alive == false, "a live pid with no engine id is not our game")
+    writeFile(livePath, tagged .. "\nlove\n" .. liveGame .. "\n")
+    live = gamepid.read(livePath)
 end
 
 local sleeper = spawnSleep()
@@ -113,7 +134,9 @@ local sleeperPath = tmp .. "/sleeper.pid"
 if sleeper then
     writeFile(sleeperPath, tostring(sleeper) .. "\r\nopenbor\r\n/work/bor.pak\r\n")
     local running = gamepid.read(sleeperPath)
-    check(running and running.alive == true and running.id == "openbor", "sleeper pid is alive")
+    check(running and running.alive == false and running.id == "openbor",
+        "an unrelated live pid is not the game")
+    check(gamepid.alive(sleeper), "the unrelated process is still alive")
     check(running and running.path == "/work/bor.pak", "cr is stripped from the path")
     os.execute("kill " .. sleeper .. " >/dev/null 2>&1")
     for _ = 1, 20 do
