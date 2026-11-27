@@ -30,6 +30,10 @@
 --   Clear unhealthySeconds unless the parsed health is "unhealthy".
 --   The first unhealthy reading (nil or 0) is Starting. At
 --   M.UNHEALTHY_LIMIT_S it is Failed. M.POLL_S is the plan's guess.
+--   Before start or restart, the caller clears statusLine, statusExit,
+--   adapter, lastStatus, and unhealthySeconds. map() treats a leftover
+--   healthy reading as current, so a non-zero startExit is ignored when
+--   health and net are both ok.
 
 local M = {}
 
@@ -76,7 +80,8 @@ function M.actionCommand(action, script, wizard)
         return shQuote(script or M.paths.service) .. " " .. action .. ' 2>&1; echo " rc=$?"'
     end
     if action == "wizard" then
-        return shQuote(wizard or M.paths.wizard)
+        -- vfat/exfat does not keep the execute bit. Same interpreter as aid.lua.
+        return "/usr/bin/python3 " .. shQuote(wizard or M.paths.wizard)
     end
     return nil
 end
@@ -374,6 +379,19 @@ function M.map(src)
 
     if healthOk then
         return result("starting", "Waiting for the adapter", nil, base)
+    end
+
+    -- A probe that cannot run (126/127), or that exits non-zero with no
+    -- status line, will never become healthy. Hold chat only while a real
+    -- status line is merely unparsed (the "nope" + exit 1 case).
+    if not status and type(statusExit) == "number" and statusExit ~= 0 then
+        local line = src.statusLine
+        local missing = type(line) ~= "string" or trim(line) == ""
+        if statusExit == 126 or statusExit == 127 or missing then
+            local detail = line
+            if missing then detail = "status probe failed" end
+            return result("failed", detail, "start", base)
+        end
     end
 
     return result("starting", "Checking the server", nil, base)

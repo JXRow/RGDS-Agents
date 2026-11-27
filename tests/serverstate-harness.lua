@@ -195,7 +195,7 @@ check("start cmd", M.actionCommand("start", "svc.sh")
     == [['svc.sh' start 2>&1; echo " rc=$?"]])
 check("restart cmd", M.actionCommand("restart")
     == [['opencode/opencode-service.sh' restart 2>&1; echo " rc=$?"]])
-check("wizard cmd", M.actionCommand("wizard", nil, "wiz.py") == "'wiz.py'")
+check("wizard cmd", M.actionCommand("wizard", nil, "wiz.py") == "/usr/bin/python3 'wiz.py'")
 check("bad cmd", M.actionCommand("stop") == nil)
 
 -- The module stays a pure function.
@@ -323,6 +323,21 @@ expect("stopped ignores exit 0", {model = MODEL, statusLine = DOWN, statusExit =
 expect("garbage line", {model = MODEL, statusLine = "nope", statusExit = 1}, {
     state = "starting",
     detail = "Checking the server",
+})
+expect("exec failure 127", {model = MODEL, statusLine = "nope", statusExit = 127}, {
+    state = "failed",
+    detail = "nope",
+    action = "start",
+})
+expect("exec failure 126", {model = MODEL, statusExit = 126}, {
+    state = "failed",
+    detail = "status probe failed",
+    action = "start",
+})
+expect("missing line nonzero", {model = MODEL, statusExit = 1}, {
+    state = "failed",
+    detail = "status probe failed",
+    action = "start",
 })
 
 -- Adapter events while the service script says healthy and the last status
